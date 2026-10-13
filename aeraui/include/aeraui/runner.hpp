@@ -65,7 +65,8 @@ DecryptionResult RunAeraUiDecryption(int credential_type,
                                           bool file_based, int user_id,
                                           int pattern_grid_size);
 
-// Marks the recovery backend ready, then joins the already-running native UI.
+// Marks the recovery backend ready and waits for the native UI result. Terminal
+// actions keep its graphics thread alive until init reboots or powers off.
 // Hardware Back and ordinary workflows stay inside the native engine.
 RunResult RunAeraUi(const DisplayMetrics& metrics = {});
 

@@ -188,10 +188,12 @@ std::atomic<int> gUiMode{0};
 std::atomic<int> gModeTransitionRequest{0};
 std::atomic<bool> gModeTransitionBusy{false};
 std::mutex gEarlyMutex;
+std::condition_variable gEarlyCondition;
 std::mutex gDecryptMutex;
 std::condition_variable gDecryptCondition;
 std::thread gEarlyThread;
 bool gEarlyStarted = false;
+bool gEarlyFinished = false;
 bool gDecryptResolved = false;
 DecryptionResult gDecryptResult = DecryptionResult::kUnavailable;
 RunResult gEarlyResult = RunResult::kUnexpectedExit;
@@ -389,6 +391,19 @@ void CaptureFrameIfRequested() {
     const int result = gr_save_screenshot("/tmp/aeraui.png");
     __android_log_print(result == 0 ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR, kLogTag,
                         "frame capture finished with result %d", result);
+}
+
+bool IsTerminalResult(RunResult result) {
+    switch (result) {
+        case RunResult::kRebootSystem:
+        case RunResult::kRebootRecovery:
+        case RunResult::kRebootBootloader:
+        case RunResult::kRebootFastbootd:
+        case RunResult::kPowerOff:
+            return true;
+        default:
+            return false;
+    }
 }
 
 RunResult ToRunResult(Action action) {
@@ -655,15 +670,16 @@ void StartAeraUiEarly(const DisplayMetrics& metrics) {
         gDecryptResult = DecryptionResult::kUnavailable;
     }
     gEarlyResult = RunResult::kUnexpectedExit;
+    gEarlyFinished = false;
     gDisplayMetrics = metrics;
     gEarlyStarted = true;
     gEarlyThread = std::thread([] {
-        gEarlyResult = RunLoop(false, gDisplayMetrics);
+        const RunResult result = RunLoop(false, gDisplayMetrics);
         {
             std::lock_guard<std::mutex> lock(gDecryptMutex);
             if (gDecryptRequested.load(std::memory_order_acquire) &&
                 !gDecryptResolved) {
-                switch (gEarlyResult) {
+                switch (result) {
                     case RunResult::kRebootSystem:
                     case RunResult::kRebootRecovery:
                     case RunResult::kRebootBootloader:
@@ -679,6 +695,23 @@ void StartAeraUiEarly(const DisplayMetrics& metrics) {
             }
         }
         gDecryptCondition.notify_all();
+        const bool terminal = IsTerminalResult(result);
+        if (terminal) {
+            __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                                "terminal action handed off with graphics thread alive");
+        }
+        {
+            std::lock_guard<std::mutex> lock(gEarlyMutex);
+            gEarlyResult = result;
+            gEarlyFinished = true;
+        }
+        gEarlyCondition.notify_all();
+        // Adreno also owns thread-local EGL state. Abandoning Engine avoids
+        // its explicit teardown, but exiting this thread still runs vendor
+        // TLS destructors. Keep it alive until init completes the power request.
+        if (terminal) {
+            for (;;) pause();
+        }
     });
 }
 
@@ -707,25 +740,25 @@ DecryptionResult RunAeraUiDecryption(int credential_type,
 
 RunResult RunAeraUi(const DisplayMetrics& metrics) {
     std::thread early_thread;
-    bool run_inline = false;
+    RunResult result;
     {
-        std::lock_guard<std::mutex> lock(gEarlyMutex);
+        std::unique_lock<std::mutex> lock(gEarlyMutex);
         if (!gEarlyStarted) {
             gBackendReady.store(true, std::memory_order_release);
-            run_inline = true;
-        } else {
-            gBackendReady.store(true, std::memory_order_release);
-            early_thread = std::move(gEarlyThread);
+            lock.unlock();
+            return RunLoop(false, metrics);
         }
+        gBackendReady.store(true, std::memory_order_release);
+        gEarlyCondition.wait(lock, [] { return gEarlyFinished; });
+        result = gEarlyResult;
+        if (IsTerminalResult(result))
+            gEarlyThread.detach();
+        else
+            early_thread = std::move(gEarlyThread);
+        gEarlyStarted = false;
     }
-
-    if (run_inline) return RunLoop(false, metrics);
-
     if (early_thread.joinable()) early_thread.join();
-
-    std::lock_guard<std::mutex> lock(gEarlyMutex);
-    gEarlyStarted = false;
-    return gEarlyResult;
+    return result;
 }
 
 RunResult RunAeraUiResume(const DisplayMetrics& metrics) {
