@@ -69,7 +69,7 @@ int main(int argc,char** argv) {
         subprocess.run([str(driver)],check=True)
     def test_actual_gatekeeper_and_weaver_adapter_with_fake_hardware(self):
         headers=self.path/'hal-headers'
-        for name in ('android/binder_manager.h','aidl/android/hardware/gatekeeper/IGatekeeper.h',
+        for name in ('hardware/hw_auth_token.h','android/binder_manager.h','aidl/android/hardware/gatekeeper/IGatekeeper.h',
                      'aidl/android/hardware/weaver/IWeaver.h','android/hardware/gatekeeper/1.0/IGatekeeper.h',
                      'android/hardware/weaver/1.0/IWeaver.h'):
             path=headers/name; path.parent.mkdir(parents=True,exist_ok=True)

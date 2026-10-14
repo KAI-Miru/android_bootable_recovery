@@ -7,7 +7,8 @@
 #include <vector>
 namespace screen_hal_mock {
 inline bool aidl_gatekeeper = false, hidl_gatekeeper = false, aidl_weaver = false, hidl_weaver = false;
-inline bool transport = true;
+inline bool transport = true, valid_token = true;
+struct __attribute__((packed)) AuthToken { uint8_t version; uint64_t challenge, user_id, authenticator_id; uint32_t authenticator_type; uint64_t timestamp; uint8_t hmac[32]; };
 inline int status = 0, timeout = 0, calls = 0, uid = -1, challenge = -1;
 inline int slots = 8, key_size = 16;
 }
@@ -38,7 +39,7 @@ struct IGatekeeper {
                           GatekeeperVerifyResponse* response) {
     ++screen_hal_mock::calls; screen_hal_mock::uid = user; screen_hal_mock::challenge = c;
     response->statusCode = screen_hal_mock::status; response->timeoutMs = screen_hal_mock::timeout;
-    response->hardwareAuthToken.mac.assign(32, 1);
+    response->hardwareAuthToken.mac.assign(screen_hal_mock::valid_token ? 32 : 0, 1);
     return {};
   }
 };
@@ -55,7 +56,7 @@ struct IGatekeeper {
     ++screen_hal_mock::calls; screen_hal_mock::uid = user; screen_hal_mock::challenge = c;
     GatekeeperResponse response{static_cast<GatekeeperStatusCode>(screen_hal_mock::status),
                                 static_cast<uint32_t>(screen_hal_mock::timeout), {}};
-    response.data.resize(69);
+    response.data.resize(screen_hal_mock::valid_token ? 69 : 0);
     callback(response); return {};
   }
 };
@@ -102,3 +103,5 @@ struct IWeaver {
   }
 };
 }
+
+using hw_auth_token_t = screen_hal_mock::AuthToken;

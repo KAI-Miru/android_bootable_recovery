@@ -50,10 +50,13 @@ struct DecryptState {
   bool submit_pending = false;
   bool secondary = false;
   bool screen_lock = false;
+  lv_timer_t* retry_timer = nullptr;
 };
 
 void DeleteState(lv_event_t *event) {
-  delete static_cast<DecryptState *>(lv_event_get_user_data(event));
+  auto* state = static_cast<DecryptState*>(lv_event_get_user_data(event));
+  if (state->retry_timer) lv_timer_delete(state->retry_timer);
+  delete state;
 }
 
 void SubmitDecrypt(DecryptState *state) {
@@ -682,12 +685,30 @@ void ClearDecryptCredential(const DecryptScene& scene) {
 void CompleteScreenCredentialAttempt(const DecryptScene& scene, bool success, int retry_seconds) {
   auto* state = static_cast<DecryptState*>(scene.state);
   if (!state) return;
+  if (state->retry_timer) { lv_timer_delete(state->retry_timer); state->retry_timer = nullptr; }
   if (success) return;
   CompleteDecryptAttempt(scene, false);
-  if (retry_seconds > 0)
-    lv_label_set_text(state->status, i18n::Format("Try again in %d seconds.", retry_seconds).c_str());
-  else i18n::BindLabel(state->status, "Could not verify your Android credential. Please try again.");
   i18n::BindLabel(state->submit_label, "Unlock");
+  if (retry_seconds <= 0) {
+    i18n::BindLabel(state->status, "Could not verify your Android credential. Please try again.");
+    return;
+  }
+  state->busy = true;
+  lv_obj_add_state(state->submit, LV_STATE_DISABLED);
+  if (state->input) lv_obj_add_state(state->input, LV_STATE_DISABLED);
+  if (state->keyboard) lv_obj_add_state(state->keyboard, LV_STATE_DISABLED);
+  for (auto* button : state->grid_buttons)
+    if (button) lv_obj_add_state(button, LV_STATE_DISABLED);
+  lv_label_set_text(state->status, i18n::Format("Try again in %d seconds.", retry_seconds).c_str());
+  state->retry_timer = lv_timer_create([](lv_timer_t* timer) {
+    auto* waiting = static_cast<DecryptState*>(lv_timer_get_user_data(timer));
+    const int remaining = RecoveryScreenLockRetrySeconds();
+    if (remaining <= 0) {
+      CompleteScreenCredentialAttempt({waiting->status, waiting->input, waiting->submit, waiting}, false, 0);
+      return;
+    }
+    lv_label_set_text(waiting->status, i18n::Format("Try again in %d seconds.", remaining).c_str());
+  }, 1000, state);
 }
 
 void BuildPreparingScene(lv_obj_t *screen, bool decrypted) {

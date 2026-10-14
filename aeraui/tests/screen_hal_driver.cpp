@@ -20,7 +20,9 @@ int main() {
       assert(result.retry_seconds == (code == -2 ? 6 : 0));
       assert(uid == 100000 && challenge == 0);
     }
-    status = 0; transport = false;
+    status = 0; valid_token = false;
+    assert(!VerifyAndroidScreenCredential(metadata, "1234").success); valid_token = true;
+    transport = false;
     assert(!VerifyAndroidScreenCredential(metadata, "1234").success); transport = true;
   }
   aidl_gatekeeper = hidl_gatekeeper = false; metadata.weaver_slot = 7;

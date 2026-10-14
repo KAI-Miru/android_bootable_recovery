@@ -262,7 +262,7 @@ bool RecoverySetScreenTimeout(int seconds) {
   return true;
 }
 bool screen_lock_enabled = false, screen_unlock_authorized = false, screen_lock_available = true;
-int screen_credential_type = 3;
+int screen_credential_type = 3, screen_retry_seconds = 0;
 bool RecoveryScreenLockAvailable() { return screen_lock_available; }
 int RecoveryScreenLockCredentialType() { return screen_credential_type; }
 int RecoveryPatternGridSize() { return 3; }
@@ -274,7 +274,7 @@ bool RecoverySetScreenLockEnabled(bool enabled) {
 bool RecoveryVerifyScreenLock(const std::string& credential) {
   screen_unlock_authorized = credential == "1234"; return screen_unlock_authorized;
 }
-int RecoveryScreenLockRetrySeconds() { return 0; }
+int RecoveryScreenLockRetrySeconds() { return screen_retry_seconds; }
 void RecoveryLockScreen() { screen_unlock_authorized = false; }
 bool RecoveryConsumeScreenUnlock() {
   const bool okay = !screen_lock_enabled || screen_unlock_authorized;
@@ -688,11 +688,21 @@ int main(int argc,char **argv) {
           assert(!RecoveryConsumeScreenUnlock()); // A UI submit is never authorization.
           ClearDecryptCredential(bouncer); assert(GetDecryptCredential(bouncer).empty());
           SetDecryptBusy(bouncer); assert(lv_obj_has_state(bouncer.submit, LV_STATE_DISABLED));
+          screen_retry_seconds = 7;
           CompleteScreenCredentialAttempt(bouncer, false, 7);
+          assert(lv_obj_has_state(bouncer.submit, LV_STATE_DISABLED));
           assert(FindLabel(lock, i18n::Format("Try again in %d seconds.", 7).c_str()));
           const std::string picture = "/tmp/aera-android-bouncer-" + std::string(language) + "-" +
               std::to_string(type) + (landscape ? "-landscape.png" : "-portrait.png");
           save(picture.c_str());
+          last_action = Action::kNone;
+          lv_obj_send_event(bouncer.submit, LV_EVENT_CLICKED, nullptr);
+          assert(last_action == Action::kNone);
+          screen_retry_seconds = 6; lv_tick_inc(1000); Tick(2);
+          assert(FindLabel(lock, i18n::Format("Try again in %d seconds.", 6).c_str()));
+          screen_retry_seconds = 0; lv_tick_inc(1000); Tick(2);
+          assert(!lv_obj_has_state(bouncer.submit, LV_STATE_DISABLED));
+          assert(!FindLabel(lock, i18n::Format("Try again in %d seconds.", 6).c_str()));
           assert(RecoveryVerifyScreenLock("1234") && RecoveryConsumeScreenUnlock());
           assert(!RecoveryConsumeScreenUnlock());
           lv_obj_delete(lock); Tick(2);

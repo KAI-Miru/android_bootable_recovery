@@ -2,6 +2,8 @@
 #include "android_screen_credential.hpp"
 #include <algorithm>
 #include <climits>
+#include <memory>
+#include <hardware/hw_auth_token.h>
 #include <openssl/crypto.h>
 #include <android/binder_manager.h>
 #include <aidl/android/hardware/gatekeeper/IGatekeeper.h>
@@ -28,7 +30,7 @@ ScreenVerification Gatekeeper(const AndroidScreenCredential& m, const std::vecto
   if (auto service = Service<ag::IGatekeeper>()) {
     ag::GatekeeperVerifyResponse response{};
     const auto result = service->verify(user, 0, m.handle, token, &response);
-    const bool okay = result.isOk() &&
+    const bool okay = result.isOk() && response.hardwareAuthToken.mac.size() == 32 &&
         (response.statusCode == ag::IGatekeeper::STATUS_OK ||
          response.statusCode == ag::IGatekeeper::STATUS_REENROLL);
     const int delay = result.isOk() && response.statusCode == ag::IGatekeeper::ERROR_RETRY_TIMEOUT
@@ -47,8 +49,9 @@ ScreenVerification Gatekeeper(const AndroidScreenCredential& m, const std::vecto
   bool called = false;
   const auto result = service->verify(user, 0, handle, secret, [&](const hg::GatekeeperResponse& r) {
     called = true;
-    verification.success = r.code == hg::GatekeeperStatusCode::STATUS_OK ||
-        r.code == hg::GatekeeperStatusCode::STATUS_REENROLL;
+    verification.success = r.data.size() == sizeof(hw_auth_token_t) &&
+        (r.code == hg::GatekeeperStatusCode::STATUS_OK ||
+         r.code == hg::GatekeeperStatusCode::STATUS_REENROLL);
     if (r.code == hg::GatekeeperStatusCode::ERROR_RETRY_TIMEOUT)
       verification.retry_seconds = Delay(r.timeout);
   });
