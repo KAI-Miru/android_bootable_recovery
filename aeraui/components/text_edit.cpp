@@ -597,7 +597,8 @@ void Attach(lv_obj_t *input) {
 
 lv_obj_t *FocusedInput() {
   return physical_focus && lv_obj_is_visible(physical_focus) &&
-      lv_obj_get_screen(physical_focus) == lv_screen_active() &&
+      (lv_obj_get_screen(physical_focus) == lv_screen_active() ||
+       lv_obj_get_screen(physical_focus) == lv_layer_top()) &&
       !lv_obj_has_state(physical_focus, LV_STATE_DISABLED) ? physical_focus : nullptr;
 }
 

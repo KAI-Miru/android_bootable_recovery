@@ -13,7 +13,6 @@ AeraScreenTimer aeraScreenTimer;
 AeraScreenTimer::AeraScreenTimer() {
   pthread_mutex_init(&mutex_, nullptr);
   ResetClock();
-  original_brightness_ = CurrentBrightness();
 }
 
 void AeraScreenTimer::ResetClock() {
@@ -22,9 +21,12 @@ void AeraScreenTimer::ResetClock() {
 
 void AeraScreenTimer::SetTimeout(int seconds) {
   pthread_mutex_lock(&mutex_);
-  timeout_seconds_ = seconds;
+  timeout_seconds_ = seconds > 0 ? seconds : 0;
   ResetClock();
   pthread_mutex_unlock(&mutex_);
+  // Changing the preference while dimmed must not leave the display dimmed
+  // forever when the new timeout is Never.
+  Wake();
 }
 
 bool AeraScreenTimer::IsScreenOff() {
@@ -49,13 +51,13 @@ void AeraScreenTimer::CheckTimeout() {
   timespec now{};
   clock_gettime(CLOCK_MONOTONIC, &now);
   const timespec elapsed = TWFunc::timespec_diff(started_, now);
-  if (timeout_seconds_ > 2 && elapsed.tv_sec > timeout_seconds_ - 2 &&
+  if (timeout_seconds_ > 2 && elapsed.tv_sec >= timeout_seconds_ - 2 &&
       state_ == State::kOn) {
     original_brightness_ = CurrentBrightness();
     TWFunc::Set_Brightness("5");
     state_ = State::kDim;
   }
-  if (timeout_seconds_ > 0 && elapsed.tv_sec > timeout_seconds_ &&
+  if (timeout_seconds_ > 0 && elapsed.tv_sec >= timeout_seconds_ &&
       (state_ == State::kOn || state_ == State::kDim)) {
     TWFunc::Set_Brightness("0");
     TWFunc::check_and_run_script("/system/bin/postscreenblank.sh", "blank");
@@ -77,8 +79,9 @@ void AeraScreenTimer::Wake() {
 #ifndef TW_NO_SCREEN_BLANK
     gr_fb_blank(false);
 #endif
-    TWFunc::check_and_run_script("/system/bin/postscreenunblank.sh", "unblank");
   }
+  if (state_ == State::kOff || state_ == State::kBlanked)
+    TWFunc::check_and_run_script("/system/bin/postscreenunblank.sh", "unblank");
   if (state_ != State::kOn && !original_brightness_.empty())
     TWFunc::Set_Brightness(original_brightness_);
   state_ = State::kOn;

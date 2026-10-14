@@ -18,6 +18,12 @@ inline bool Inside(lv_obj_t *obj, lv_obj_t *root) {
   return false;
 }
 inline lv_obj_t *Scope() {
+  // Password prompts live on the lock screen in LVGL's top layer.
+  auto* input = text_edit::FocusedInput();
+  if (input && lv_obj_get_screen(input) == lv_layer_top()) {
+    for (auto* parent = input; parent; parent = lv_obj_get_parent(parent))
+      if (lv_obj_get_user_data(parent) == &widgets::kModalMarker) return parent;
+  }
   auto *screen=lv_screen_active();
   lv_obj_update_layout(screen);
   for(int i=static_cast<int>(lv_obj_get_child_count(screen))-1;i>=0;--i) {

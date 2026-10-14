@@ -170,6 +170,7 @@ bool RecoveryResetThemeSettings() {
   return true;
 }
 bool RecoveryResetPreferences() {
+  RecoverySetScreenTimeout(60);
   preferences[static_cast<int>(Preference::kClock24)] = false;
   haptic_durations[0] = haptic_durations[1] = 40;
   haptic_durations[2] = 160;
@@ -241,6 +242,35 @@ std::vector<AndroidUser> RecoveryAndroidUsers() {
 bool RecoverySetStorage(const std::string &) { return true; }
 int RecoveryBrightness() { return 50; }
 void RecoverySetBrightness(int) {}
+bool screen_timeout_available = true;
+int screen_timeout = 60;
+bool RecoveryScreenTimeoutAvailable() { return screen_timeout_available; }
+int RecoveryScreenTimeout() { return screen_timeout; }
+bool RecoverySetScreenTimeout(int seconds) {
+  if (!screen_timeout_available || seconds < 0 || seconds > 3600) return false;
+  screen_timeout = seconds;
+  return true;
+}
+bool screen_lock_enabled = false, screen_unlock_authorized = false;
+std::string screen_lock_password;
+bool RecoveryScreenLockEnabled() { return screen_lock_enabled; }
+bool RecoveryChangeScreenLockPassword(const std::string& current, const std::string& replacement) {
+  if (screen_lock_enabled && current != screen_lock_password) return false;
+  screen_lock_password = replacement; screen_lock_enabled = true; return true;
+}
+bool RecoveryDisableScreenLock(const std::string& current) {
+  if (current != screen_lock_password) return false;
+  screen_lock_enabled = false; return true;
+}
+bool RecoveryVerifyScreenLock(const std::string& password) {
+  screen_unlock_authorized = password == screen_lock_password; return screen_unlock_authorized;
+}
+int RecoveryScreenLockRetrySeconds() { return 0; }
+void RecoveryLockScreen() { screen_unlock_authorized = false; }
+bool RecoveryConsumeScreenUnlock() {
+  const bool okay = !screen_lock_enabled || screen_unlock_authorized;
+  screen_unlock_authorized = false; return okay;
+}
 bool RecoveryMtpEnabled() { return false; }
 bool RecoverySetMtp(bool) { return true; }
 std::vector<Volume> RecoveryImageVolumes() {
@@ -539,6 +569,61 @@ int main(int argc,char **argv) {
     assert(png_image_write_to_file(&image,path,0,frame.data(),0,nullptr));
   };
   auto *screen=lv_screen_active();
+  if (!strcmp(argv[1], "--screen-lock")) {
+    for (const char* language : {"en", "zh_CN", "zh_TW"})
+      for (const bool landscape : {false, true}) {
+        assert(i18n::SetLanguage(language));
+        lv_display_set_resolution(display, landscape ? 3168 : 1440, landscape ? 1440 : 3168);
+        screen_lock_enabled = false;
+        auto* prefs = lv_obj_create(nullptr);
+        BuildToolScene(prefs, Action::kPreferences, RecordAction, nullptr);
+        lv_screen_load(prefs); Tick(2);
+        auto* entry = FindPreferenceEntry(prefs, i18n::Translate("Screen lock password")); assert(entry);
+        lv_obj_send_event(entry, LV_EVENT_CLICKED, nullptr); Tick(2);
+        auto* input = FindType(prefs, &lv_textarea_class); assert(input);
+        assert(lv_textarea_get_password_mode(input));
+        lv_textarea_set_text(input, "short");
+        lv_obj_send_event(Find(prefs, i18n::Translate("Continue")), LV_EVENT_CLICKED, nullptr);
+        assert(!screen_lock_enabled && FindLabel(prefs, i18n::Translate("Use at least 8 characters.")));
+        lv_textarea_set_text(input, "host-ui-password");
+        lv_obj_send_event(Find(prefs, i18n::Translate("Continue")), LV_EVENT_CLICKED, nullptr); Tick(2);
+        input = FindType(prefs, &lv_textarea_class); assert(input);
+        lv_textarea_set_text(input, "not-the-same");
+        lv_obj_send_event(Find(prefs, i18n::Translate("Continue")), LV_EVENT_CLICKED, nullptr);
+        assert(!screen_lock_enabled && FindLabel(prefs, i18n::Translate("Passwords do not match.")));
+        lv_textarea_set_text(input, "host-ui-password");
+        lv_obj_send_event(Find(prefs, i18n::Translate("Continue")), LV_EVENT_CLICKED, nullptr); Tick(2);
+        assert(screen_lock_enabled);
+        lv_screen_load(screen); lv_obj_delete(prefs);
+        auto* lock = BuildLockScene(lv_layer_top(), RecordAction, nullptr); Tick(2);
+        assert(!FindLabel(lock, i18n::Translate("Slide to unlock")));
+        auto* unlock = Find(lock, i18n::Translate("Unlock with password")); assert(unlock);
+        lv_obj_send_event(unlock, LV_EVENT_CLICKED, nullptr); Tick(2);
+        input = FindType(lock, &lv_textarea_class); assert(input);
+        assert(lv_textarea_get_password_mode(input));
+        assert(text_edit::FocusedInput() == input && phone_keyboard::VisibleKeyboard());
+        hardware_keys::State physical;
+        assert(physical.Update(KEY_A, 1));
+        assert(hardware_keyboard::Handle(KEY_A, 1, physical));
+        assert(!strcmp(lv_textarea_get_text(input), "a"));
+        last_action = Action::kNone;
+        lv_textarea_set_text(input, "wrong");
+        lv_obj_send_event(Find(lock, i18n::Translate("Continue")), LV_EVENT_CLICKED, nullptr);
+        assert(last_action == Action::kNone && !RecoveryConsumeScreenUnlock());
+        const std::string picture = "/tmp/aera-screen-password-" + std::string(language) +
+            (landscape ? "-landscape.png" : "-portrait.png");
+        save(picture.c_str());
+        lv_textarea_set_text(input, "host-ui-password");
+        lv_obj_send_event(Find(lock, i18n::Translate("Continue")), LV_EVENT_CLICKED, nullptr);
+        assert(last_action == Action::kUnlock && RecoveryConsumeScreenUnlock());
+        assert(!RecoveryConsumeScreenUnlock());
+        Tick(2); lv_obj_delete(lock);
+      }
+    lv_display_delete(display); lv_deinit();
+    std::filesystem::remove_all(backup_root);
+    puts("Password setup, confirmation, masked unlock, rejection and English/Chinese layouts passed.");
+    return 0;
+  }
   if (!strcmp(argv[1], "--status-bar-settings")) {
     for (const char *language : {"en", "de_DE"}) {
       assert(i18n::SetLanguage(language));
@@ -1181,6 +1266,24 @@ int main(int argc,char **argv) {
     assert(autosave_count == 1);
     lv_obj_send_event(slider, LV_EVENT_RELEASED, nullptr);
     assert(autosave_count == 2);
+    for (const auto &option : std::vector<std::pair<const char *, int>>{
+        {"15 seconds", 15}, {"1 minute", 60}, {"Never", 0}}) {
+      auto *timeout = FindPreferenceEntry(prefs, "Screen timeout"); assert(timeout);
+      lv_obj_send_event(timeout, LV_EVENT_CLICKED, nullptr);
+      Tick(2);
+      auto *choice = Find(prefs, option.first); assert(choice);
+      const int before = autosave_count;
+      lv_obj_send_event(choice, LV_EVENT_CLICKED, nullptr);
+      Tick(2);
+      assert(screen_timeout == option.second);
+      assert(autosave_count == before + 1);
+    }
+    screen_timeout_available = false;
+    auto *unsupported = lv_obj_create(nullptr);
+    BuildToolScene(unsupported, Action::kPreferences, RecordAction, nullptr);
+    assert(!Find(unsupported, "Screen timeout"));
+    lv_obj_delete(unsupported);
+    screen_timeout_available = true;
     lv_obj_send_event(FindPreferenceEntry(prefs, "Haptics"), LV_EVENT_CLICKED, nullptr);
     Tick(2);
     save("/tmp/aera-preferences-haptics-host.png");
@@ -1231,7 +1334,7 @@ int main(int argc,char **argv) {
     const auto kept_accent = accent_color;
     const int before_reset = autosave_count;
     lv_obj_send_event(Find(prefs, "Reset preferences"), LV_EVENT_CLICKED, nullptr);
-    assert(Find(prefs, "Restore default preferences? Theme, language, Wi-Fi and plugin settings are kept."));
+    assert(Find(prefs, "Restore default preferences? Theme, language, Wi-Fi, plugin settings and the screen lock password are kept."));
     assert(autosave_count == before_reset);
     ConfirmSettingsModal(prefs); Tick(2);
     assert(autosave_count == before_reset + 1);
@@ -1371,7 +1474,7 @@ int main(int argc,char **argv) {
             BuildToolScene(prefs, Action::kPreferences, RecordAction, nullptr);
             lv_screen_load(prefs); Tick(1);
             std::vector<const char *> titles{
-                "Language", "Brightness", "24-hour clock", "Time zone", "Gesture navigation"};
+                "Language", "Brightness", "Screen timeout", "Screen lock password", "24-hour clock", "Time zone", "Gesture navigation"};
             if (haptics) titles.push_back("Haptics");
             titles.push_back("Show hidden files");
             titles.push_back("Verify ZIP signatures");

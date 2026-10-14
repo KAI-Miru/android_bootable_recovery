@@ -53,6 +53,7 @@
 #include "aeraui/features/backup/app_vault.hpp"
 #include "aeraui/platform/image_targets.hpp"
 #include "temperature_reader.hpp"
+#include "screen_lock.hpp"
 #include <twinstall.h>
 #include <twinstall/adb_install.h>
 
@@ -1674,6 +1675,47 @@ bool RecoveryAnswerInstallerPrompt(bool accepted) {
   DataManager::SetValue("aera_installer_prompt_active", 0);
   return true;
 }
+namespace {
+ScreenLockCredential& ScreenPassword() {
+  static ScreenLockCredential credential("/data/system/aera/screen-lock.conf");
+  return credential;
+}
+}
+
+bool RecoveryScreenLockEnabled() { return ScreenPassword().Enabled(); }
+bool RecoveryChangeScreenLockPassword(const std::string& current, const std::string& replacement) {
+  // Never create a credential store in the ramdisk underneath an unmounted /data.
+  return PartitionManager.Is_Mounted_By_Path("/data") && ScreenPassword().Change(current, replacement);
+}
+bool RecoveryDisableScreenLock(const std::string& current) {
+  return PartitionManager.Is_Mounted_By_Path("/data") && ScreenPassword().Disable(current);
+}
+bool RecoveryVerifyScreenLock(const std::string& password) { return ScreenPassword().Verify(password); }
+int RecoveryScreenLockRetrySeconds() { return ScreenPassword().RetrySeconds(); }
+void RecoveryLockScreen() { ScreenPassword().Lock(); }
+bool RecoveryConsumeScreenUnlock() { return ScreenPassword().ConsumeUnlock(); }
+
+bool RecoveryScreenTimeoutAvailable() {
+#ifdef TW_NO_SCREEN_TIMEOUT
+  return false;
+#else
+  return true;
+#endif
+}
+
+int RecoveryScreenTimeout() {
+  return RecoveryScreenTimeoutAvailable()
+      ? std::clamp(DataManager::GetIntValue("tw_screen_timeout_secs"), 0, 3600)
+      : 0;
+}
+
+bool RecoverySetScreenTimeout(int seconds) {
+  if (!RecoveryScreenTimeoutAvailable() || seconds < 0 || seconds > 3600)
+    return false;
+  // DataManager updates the native timer and the persisted setting together.
+  return DataManager::SetValue("tw_screen_timeout_secs", seconds) == 0;
+}
+
 int RecoveryBrightness() {
   LoadAeraPreferencesIfAvailable();
   return DataManager::GetIntValue("tw_brightness_pct");
@@ -2117,6 +2159,7 @@ struct EarlyUiPreferences {
   int clock24;
   std::string timezone;
   int brightness;
+  int screen_timeout;
   std::string accent;
   std::string theme;
   int surface_style;
@@ -2186,6 +2229,7 @@ EarlyUiPreferences DefaultEarlyUiPreferences() {
   preferences.timezone = DataManager::GetStrValue(TW_TIME_ZONE_VAR);
   if (!ValidPlainText(preferences.timezone, 96)) preferences.timezone = "UTC0";
   preferences.brightness = 100;
+  preferences.screen_timeout = RecoveryScreenTimeoutAvailable() ? 60 : 0;
 #ifdef TW_DEFAULT_BRIGHTNESS
   const int maximum = DataManager::GetIntValue("tw_brightness_max");
   if (maximum > 0)
@@ -2234,6 +2278,7 @@ EarlyUiPreferences CaptureCurrentEarlyUiPreferences() {
   preferences.timezone = DataManager::GetStrValue(TW_TIME_ZONE_VAR);
   if (!ValidPlainText(preferences.timezone, 96)) preferences.timezone = "UTC0";
   preferences.brightness = DataManager::GetIntValue("tw_brightness_pct");
+  preferences.screen_timeout = RecoveryScreenTimeout();
   if (preferences.brightness < 10 || preferences.brightness > 100) preferences.brightness = 100;
   preferences.accent = DataManager::GetStrValue("aera_theme_accent");
   if (!ValidAccent(preferences.accent)) preferences.accent = "16c8ff";
@@ -2383,6 +2428,7 @@ bool ResetAeraSettings(bool theme) {
     set("tw_action_vibrate", defaults.haptic_action);
     DataManager::update_tz_environment_variables();
     RecoverySetBrightness(defaults.brightness);
+    RecoverySetScreenTimeout(defaults.screen_timeout);
   }
   return restored;
 }
@@ -2400,6 +2446,9 @@ bool SetEarlyUiValue(EarlyUiPreferences* preferences, const std::string& key,
   } else if (key == "brightness") {
     if (!ParseInteger(value, 10, 100, &parsed)) return false;
     preferences->brightness = parsed;
+  } else if (key == "screen_timeout") {
+    if (!ParseInteger(value, 0, 3600, &parsed)) return false;
+    preferences->screen_timeout = parsed;
   } else if (key == "accent") {
     if (!ValidAccent(value)) return false;
     preferences->accent = value;
@@ -2534,6 +2583,7 @@ void ApplyEarlyUiPreferences(const EarlyUiPreferences& preferences) {
   DataManager::SetValue("tw_military_time", preferences.clock24);
   DataManager::SetValue(TW_TIME_ZONE_VAR, preferences.timezone);
   DataManager::SetValue("tw_brightness_pct", preferences.brightness);
+  RecoverySetScreenTimeout(preferences.screen_timeout);
   DataManager::SetValue("aera_theme_accent", preferences.accent);
   DataManager::SetValue("aera_theme_mode",
                         preferences.surface_style == 4 ? "amoled"
@@ -2631,6 +2681,7 @@ std::string SerializeEarlyUiPreferences(const EarlyUiPreferences& preferences) {
          << "clock24=" << preferences.clock24 << '\n'
          << "timezone=" << preferences.timezone << '\n'
          << "brightness=" << preferences.brightness << '\n'
+         << "screen_timeout=" << preferences.screen_timeout << '\n'
          << "accent=" << preferences.accent << '\n'
          << "theme=" << preferences.theme << '\n'
          << "surface_style=" << preferences.surface_style << '\n'

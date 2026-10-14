@@ -31,7 +31,7 @@ add_executable(ui_check ui_check.cpp
   ../scenes/wifi_scene.cpp ../components/picture_decode.cpp
   ../components/picture_viewer.cpp ../components/wallpaper.cpp
   ../scenes/operation_scene.cpp
-  ../scenes/decrypt_scene.cpp ../features/browser/web_scene.cpp
+  ../scenes/decrypt_scene.cpp ../scenes/lock_scene.cpp ../features/browser/web_scene.cpp
   ../features/browser/session.cpp ../features/browser/launcher.cpp)
 target_include_directories(ui_check PRIVATE .. ../include ../components ../assets
   ../features ../features/files ../localization ../localization/fonts
@@ -85,6 +85,7 @@ add_test(NAME ui_confirmation_navigation_preferences
   COMMAND ui_check "${LVGL_DIR}/examples/libs/libpng/png_demo.png")
 add_test(NAME file_timestamp_layout COMMAND ui_check --file-dates)
 add_test(NAME settings_autosave_and_reset COMMAND ui_check --settings)
+add_test(NAME screen_password_ui COMMAND ui_check --screen-lock)
 add_test(NAME themed_home_artwork COMMAND ui_check --art)
 add_test(NAME themed_home_layout COMMAND ui_check --home-art)
 add_test(NAME pc_connection_settings_layout COMMAND ui_check --pc-settings)
@@ -320,7 +321,7 @@ target_compile_definitions(frp_wipe_enabled_test PRIVATE AERA_ENABLE_FRP_WIPE=1)
 
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
-  foreach(test reboot_handoff fastbootd_capability recovery_staging native_buffer_library vendor_ui_mount)
+  foreach(test reboot_handoff fastbootd_capability recovery_staging native_buffer_library vendor_ui_mount screen_timer screen_lock screen_preferences)
     add_test(NAME ${test} COMMAND "${Python3_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/${test}_test.py")
   endforeach()

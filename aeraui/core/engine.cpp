@@ -809,9 +809,14 @@ public:
   }
   bool KeyboardKey(unsigned code, int value) {
     if (!physical_keys_.Update(code, value)) return false;
-    if (suspended_ || lock_overlay_ || power_overlay_) { ResetKeyboard(); return true; }
+    bool lock_input = false;
+    for (auto* input = text_edit::FocusedInput(); input; input = lv_obj_get_parent(input))
+      if (input == lock_overlay_) lock_input = true;
+    if (suspended_ || (lock_overlay_ && !lock_input) || power_overlay_) { ResetKeyboard(); return true; }
     if (!hardware_keyboard::Handle(code, value, physical_keys_) &&
-        code == KEY_ESC && value == 1) NavigateBack();
+        code == KEY_ESC && value == 1) {
+      if (lock_overlay_) widgets::DismissModal(lock_overlay_); else NavigateBack();
+    }
     return true;
   }
 
@@ -1077,7 +1082,11 @@ public:
   bool IsInitialized() const { return initialized_; }
 
   void SetSuspended(bool suspended) {
-    if (suspended) ResetKeyboard();
+    if (suspended) {
+      ResetKeyboard();
+      auto* input = text_edit::FocusedInput();
+      if (input && lv_textarea_get_password_mode(input)) lv_textarea_set_text(input, "");
+    }
     suspended_ = suspended;
     SetMouseConnected(mouse_connected_);
     if (suspended_ && mouse_device_) {
@@ -1093,6 +1102,7 @@ public:
   void ShowLockScreen() {
     ResetKeyboard();
     if (!initialized_ || lock_overlay_ != nullptr) return;
+    RecoveryLockScreen();
     CancelEdgeSwipe();
     CancelRecentsSwipe();
     pointer_.pressed = false;
@@ -2374,6 +2384,7 @@ private:
     }
 
     if (action == Action::kUnlock) {
+      if (!RecoveryConsumeScreenUnlock()) return;
       if (self->lock_overlay_ != nullptr) {
         lv_obj_t *lock = self->lock_overlay_;
         self->lock_overlay_ = nullptr;
@@ -2382,6 +2393,9 @@ private:
       }
       return;
     }
+    const bool power_action = action == Action::kRebootSystem || action == Action::kRebootRecovery ||
+        action == Action::kRebootBootloader || action == Action::kRebootFastbootd || action == Action::kPowerOff;
+    if (self->lock_overlay_ && RecoveryScreenLockEnabled() && !power_action) return;
 
     if (self->decryption_active_) {
       if (action == Action::kDecryptSubmit) {
@@ -2989,9 +3003,10 @@ private:
       return;
     }
     if (!pc_overlay_ && !PcBlockedByModal() &&
+        (!lock_overlay_ || !RecoveryScreenLockEnabled()) &&
         aera::pc::TakeInstallRequest(&install) && aera::pc::BeginInstall(install.id)) {
       // A browser-confirmed job replaces the idle swipe lock, never decryption.
-      if (lock_overlay_ && install.job.show_on_device) {
+      if (lock_overlay_ && install.job.show_on_device && !RecoveryScreenLockEnabled()) {
         auto *lock = lock_overlay_; lock_overlay_ = nullptr;
         lv_obj_delete(lock);
       }

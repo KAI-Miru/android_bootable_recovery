@@ -290,6 +290,7 @@ bool HandleEvent(Engine& engine, InteractionBoost& performance,
     if (event.type == EV_ABS) {
         if (hardware.screen_off) return false;
         performance.Boost();
+        aeraScreenTimer.Wake();
         PointerEvent pointer;
         pointer.x = event.value >> 16;
         pointer.y = event.value & 0xffff;
@@ -304,6 +305,8 @@ bool HandleEvent(Engine& engine, InteractionBoost& performance,
     }
 
     if (event.type != EV_KEY) return false;
+    if (event.value != 0 && !hardware.screen_off)
+        aeraScreenTimer.Wake();
 
     // Ordinary keyboard keys precede the handset Home fallback, so Home/End
     // edit text instead of navigating away from the active field.
@@ -384,6 +387,17 @@ bool HandleEvent(Engine& engine, InteractionBoost& performance,
     return false;
 }
 
+void CheckScreenTimeout(Engine& engine, HardwareState& hardware) {
+    if (hardware.screen_off || hardware.power_down) return;
+    aeraScreenTimer.CheckTimeout();
+    if (aeraScreenTimer.IsScreenOff()) {
+        engine.SetSuspended(true);
+        hardware.screen_off = true;
+        __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                            "display suspended after inactivity");
+    }
+}
+
 void CaptureFrameIfRequested() {
     constexpr char kRequest[] = "/tmp/aeraui-capture";
     if (access(kRequest, F_OK) != 0) return;
@@ -447,6 +461,7 @@ RunResult RunLoop(bool fastboot_mode = false,
     if (!engine.Initialize(fastboot_mode, metrics.adaptive_resolution,
                            metrics.logical_height, resume_recovery))
         return RunResult::kEngineFailure;
+    aeraScreenTimer.Wake();
 
     struct ModeStateGuard {
         ~ModeStateGuard() {
@@ -528,10 +543,13 @@ RunResult RunLoop(bool fastboot_mode = false,
             }
         }
         if (hardware.screen_off && aera::pc::NeedsUiAttention()) {
+            engine.ShowLockScreen();
             engine.SetSuspended(false);
+            engine.RunFrame();
             aeraScreenTimer.Wake();
             hardware.screen_off = false;
         }
+        CheckScreenTimeout(engine, hardware);
         engine.SetMouseConnected(ev_has_mouse() != 0);
         const int wait_ms = static_cast<int>(engine.RunFrame());
         // The display backend may still own/import the current GPU buffer

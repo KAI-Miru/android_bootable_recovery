@@ -86,9 +86,20 @@ backup compression, SHA-256/MD5 backup checksums, and USB MTP. Stock DataManager
 settings feed the native file/clock UI and existing install/backup backend.
 Save preferences uses the stock settings store; failures are reported rather
 than presented as success. Backup checksum generation and restore verification
-remain enabled. This is not complete OrangeFox settings parity: XML themes,
-recovery passwords, native screen timeout/locking, haptics and OTA preferences
+remain enabled. This is not complete OrangeFox settings parity: XML themes and OTA preferences
 still need dedicated native integration.
+
+Preferences places Screen timeout and Screen lock password below Brightness.
+The timeout defaults to one minute and can be set to Never. Input resets the
+timer; inactivity dims then blanks the panel. Power wakes into the lock scene,
+while background recovery workers continue running.
+
+The optional lock uses a separate AERA password. Its salted PBKDF2-SHA256
+verifier is stored privately in `/data/system/aera/screen-lock.conf`; it is not
+an Android credential and is never sent through DataManager or the host API.
+Changing or disabling it requires the current password, failed checks are
+throttled, and resetting preferences keeps the password. This protects access
+to the recovery UI, not storage encryption or an existing root ADB connection.
 
 Host-only regression checks (mock controllers, no destructive backend linked):
 

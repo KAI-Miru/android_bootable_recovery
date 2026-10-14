@@ -81,6 +81,7 @@ LOCAL_SRC_FILES += \
     aera_supplicant_link.cpp \
     aera_adbd.cpp \
     aera_secrets/aera_secrets.cpp \
+    aeraui/platform/screen_lock.cpp \
     nas/NasManager.cpp
 LOCAL_C_INCLUDES += \
     $(LOCAL_PATH) \
