@@ -1125,6 +1125,16 @@ public:
     lock_overlay_ = BuildLockScene(lv_layer_top(), HandleSceneAction, this, &screen_credential_scene_);
   }
 
+  void RebuildLockScreen() {
+    if (!lock_overlay_) return;
+    CloseStatusBarShades();
+    auto* previous = lock_overlay_;
+    lock_overlay_ = nullptr;
+    screen_credential_scene_ = {};
+    lv_obj_delete_async(previous);
+    ShowLockScreen();
+  }
+
   void ShowPowerMenu() {
     ResetKeyboard();
     if (!initialized_ || power_overlay_ != nullptr || suspended_) return;
@@ -2558,6 +2568,7 @@ private:
                           self->landscape_ ? "landscape" : "portrait");
       if (action == Action::kToggleRotation)
         self->ShowHome();
+      self->RebuildLockScreen();
       return;
     }
 

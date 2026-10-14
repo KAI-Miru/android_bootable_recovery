@@ -510,6 +510,13 @@ static void AssertInside(lv_obj_t *object, int width, int height) {
   assert(area.x1 >= 0 && area.y1 >= 0);
   assert(area.x2 < width && area.y2 < height);
 }
+static void AssertBackgroundCovers(lv_obj_t* object) {
+  lv_obj_update_layout(object);
+  const auto* image = static_cast<const lv_image_dsc_t*>(lv_obj_get_style_bg_image_src(object, LV_PART_MAIN));
+  assert(image && image->header.magic == LV_IMAGE_HEADER_MAGIC);
+  assert(image->header.w >= lv_obj_get_width(object));
+  assert(image->header.h >= lv_obj_get_height(object));
+}
 static void AssertContained(lv_obj_t *child, lv_obj_t *parent) {
   const lv_area_t inner = Bounds(child);
   const lv_area_t outer = Bounds(parent);
@@ -592,11 +599,13 @@ int main(int argc,char **argv) {
         auto* change = Find(wipe, i18n::Translate("Change filesystem")); assert(change);
         lv_obj_send_event(change, LV_EVENT_CLICKED, nullptr); Tick(2);
         assert(status_bar_interactive);
+        AssertBackgroundCovers(lv_obj_get_child(wipe, -1));
         const auto picture_suffix = std::string(language) + (landscape ? "-landscape.png" : "-portrait.png");
         save(("/tmp/aera-filesystem-partition-" + picture_suffix).c_str());
         auto* data = Find(lv_obj_get_child(wipe, -1), "Data"); assert(data); lv_obj_send_event(data, LV_EVENT_CLICKED, nullptr); Tick(2);
         assert(status_bar_interactive);
         auto* choices = lv_obj_get_child(wipe, -1);
+        AssertBackgroundCovers(choices);
         assert(!FindLabel(choices, LV_SYMBOL_TRASH));
         assert(FindLabel(choices, LV_SYMBOL_DRIVE));
         save(("/tmp/aera-filesystem-chooser-" + picture_suffix).c_str());
@@ -604,6 +613,7 @@ int main(int argc,char **argv) {
         assert(status_bar_interactive);
         auto* input = FindType(wipe, &lv_textarea_class);
         auto* submit = Find(wipe, i18n::Translate("Format partition now")); assert(input && submit);
+        AssertBackgroundCovers(lv_obj_get_parent(input));
         callback_count = 0;
         for (const char* bad : {"", "YES", "yesplease", " yes", "yes "}) {
           lv_textarea_set_text(input, bad);
@@ -709,8 +719,45 @@ int main(int argc,char **argv) {
         }
     i18n::SetLanguage("en");
     screen_lock_enabled = false;
+    lv_display_set_resolution(display, 1440, 3168);
     auto* slide = BuildLockScene(lv_layer_top(), RecordAction, nullptr);
-    assert(FindLabel(slide, "Slide to unlock") && status_bar_interactive); lv_obj_delete(slide);
+    assert(FindLabel(slide, "Slide to unlock") && status_bar_interactive);
+    struct Pointer { lv_point_t point{}; bool pressed = false; } pointer;
+    auto* input = lv_indev_create();
+    lv_indev_set_type(input, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_display(input, display);
+    lv_indev_set_mode(input, LV_INDEV_MODE_EVENT);
+    lv_indev_set_user_data(input, &pointer);
+    lv_indev_set_read_cb(input, [](lv_indev_t* device, lv_indev_data_t* data) {
+      const auto* p = static_cast<Pointer*>(lv_indev_get_user_data(device));
+      data->point = p->point;
+      const auto rotation = lv_display_get_rotation(lv_indev_get_display(device));
+      // Feed raw panel coordinates; LVGL applies the display rotation next.
+      if (rotation == LV_DISPLAY_ROTATION_90) data->point = {p->point.y, 3168 - p->point.x - 1};
+      if (rotation == LV_DISPLAY_ROTATION_270) data->point = {1440 - p->point.y - 1, p->point.x};
+      data->state = p->pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    });
+    for (const auto rotation : {LV_DISPLAY_ROTATION_90, LV_DISPLAY_ROTATION_0, LV_DISPLAY_ROTATION_270}) {
+      lv_display_set_rotation(display, rotation);
+      // Engine rebuilds the existing overlay after changing display rotation.
+      lv_obj_delete(slide);
+      slide = BuildLockScene(lv_layer_top(), RecordAction, nullptr); Tick();
+      auto* slider = Find(slide, "Slide to unlock"); assert(slider && status_bar_interactive);
+      AssertInside(slider, lv_display_get_horizontal_resolution(display), lv_display_get_vertical_resolution(display));
+      AssertBackgroundCovers(slide);
+      const auto bounds = Bounds(slider);
+      pointer.point = {bounds.x1 + 78, (bounds.y1 + bounds.y2) / 2};
+      pointer.pressed = true; lv_indev_read(input);
+      for (int step = 1; step <= 10; ++step) {
+        pointer.point.x = bounds.x1 + 78 + (lv_obj_get_width(slider) - 156) * step / 10;
+        lv_indev_read(input);
+      }
+      callback_count = 0; last_action = Action::kNone;
+      pointer.pressed = false; lv_indev_read(input); Tick(20);
+      assert(callback_count == 1 && last_action == Action::kUnlock);
+      save((rotation == LV_DISPLAY_ROTATION_0 ? "/tmp/aera-slider-portrait.png" : "/tmp/aera-slider-landscape.png"));
+    }
+    lv_indev_delete(input); lv_obj_delete(slide);
     puts("Direct PIN/pattern/password bouncers, unsupported-device gating and English/Chinese layouts passed.");
     return 0;
   }

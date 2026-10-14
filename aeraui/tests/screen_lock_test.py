@@ -67,6 +67,34 @@ int main(int argc,char** argv) {
         subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror','-I',str(ROOT),str(source),
             str(ROOT/'aeraui/platform/android_screen_credential_stub.cpp'),'-o',str(driver)],check=True)
         subprocess.run([str(driver)],check=True)
+    def test_rotation_rebuilds_an_existing_lock_without_authorizing_unlock(self):
+        from screen_timer_test import definition
+        engine=(ROOT/'aeraui/core/engine.cpp').read_text()
+        method=definition(engine,'void RebuildLockScreen()')
+        rotation=engine[engine.index('if (action == Action::kToggleRotation ||'):engine.index('if (action == Action::kToggleRecording)')]
+        self.assertLess(rotation.index('lv_display_set_rotation('), rotation.index('self->RebuildLockScreen();'))
+        source=self.path/'rotate-lock.cpp'
+        source.write_text('''#include <cassert>
+int closed=0,deleted=0;
+void CloseStatusBarShades() { ++closed; }
+void lv_obj_delete_async(int* object) { assert(*object==7); ++deleted; }
+struct Engine {
+  int old=7,next=9; int* lock_overlay_=nullptr;
+  int screen_credential_scene_=5; int builds=0;
+  void ShowLockScreen() { assert(lock_overlay_==nullptr && screen_credential_scene_==0); lock_overlay_=&next; ++builds; }
+'''+method+'''
+};
+int main() {
+  Engine engine;
+  engine.RebuildLockScreen(); assert(engine.builds==0 && closed==0);
+  engine.lock_overlay_=&engine.old;
+  engine.RebuildLockScreen();
+  assert(engine.lock_overlay_==&engine.next && engine.builds==1 && closed==1 && deleted==1);
+}
+''')
+        driver=self.path/'rotate-lock'
+        subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror',str(source),'-o',str(driver)],check=True)
+        subprocess.run([str(driver)],check=True)
     def test_actual_gatekeeper_and_weaver_adapter_with_fake_hardware(self):
         headers=self.path/'hal-headers'
         for name in ('hardware/hw_auth_token.h','android/binder_manager.h','aidl/android/hardware/gatekeeper/IGatekeeper.h',

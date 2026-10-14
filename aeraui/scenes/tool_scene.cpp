@@ -964,9 +964,10 @@ void ChooseFilesystem(Tools* state) {
         Row(options, n * 190, LV_SYMBOL_DRIVE, fs, volume.path, [state, choices, volume, fs] {
           lv_obj_delete_async(choices);
           auto* confirmation = lv_obj_create(state->screen);
-          Clear(confirmation); MainBackground(confirmation);
+          Clear(confirmation);
           lv_obj_set_user_data(confirmation, &kModalMarker);
           lv_obj_set_size(confirmation, LV_PCT(100), LV_PCT(100));
+          MainBackground(confirmation);
           auto* dialog = new Tools;
           dialog->screen = confirmation; dialog->tool = Action::kWipe;
           dialog->callback = state->callback; dialog->context = state->context;

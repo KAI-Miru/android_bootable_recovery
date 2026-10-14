@@ -172,12 +172,13 @@ void DeleteState(lv_event_t *event) {
 
 lv_obj_t *BuildLockScene(lv_obj_t *parent, ActionCallback callback,
                          void *context, DecryptScene *bouncer) {
+  lv_obj_update_layout(parent);
   if (RecoveryScreenLockEnabled()) {
     CloseStatusBarShades();
     auto* root = lv_obj_create(parent);
-    MainBackground(root);
     lv_obj_set_size(root, lv_obj_get_width(parent), lv_obj_get_height(parent));
     lv_obj_set_pos(root, 0, 0);
+    MainBackground(root);
     lv_obj_update_layout(root);
     const auto scene = BuildScreenCredentialScene(root, RecoveryScreenLockCredentialType(),
         RecoveryPatternGridSize(), callback, context);
@@ -194,9 +195,9 @@ lv_obj_t *BuildLockScene(lv_obj_t *parent, ActionCallback callback,
   state->landscape = screen_width > screen_height;
 
   auto *root = lv_obj_create(parent);
-  MainBackground(root);
   lv_obj_set_pos(root, 0, 0);
   lv_obj_set_size(root, screen_width, screen_height);
+  MainBackground(root);
   lv_obj_set_style_pad_all(root, 0, 0);
   lv_obj_remove_flag(root, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(root, DeleteState, LV_EVENT_DELETE, state);
