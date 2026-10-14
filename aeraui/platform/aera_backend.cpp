@@ -2888,6 +2888,7 @@ bool SaveAeraPreferences(bool require_early) {
          << "recents=" << DataManager::GetIntValue("aera_recents_enabled") << '\n'
          << "timezone=" << DataManager::GetStrValue(TW_TIME_ZONE_VAR) << '\n'
          << "brightness=" << DataManager::GetIntValue("tw_brightness_pct") << '\n'
+         << "screen_timeout=" << RecoveryScreenTimeout() << '\n'
          << "accent=" << DataManager::GetStrValue("aera_theme_accent") << '\n'
          << "theme="
          << (RecoveryAppearanceMode() == AppearanceMode::kAmoled ? "amoled"

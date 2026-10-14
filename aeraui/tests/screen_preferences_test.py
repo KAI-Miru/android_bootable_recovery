@@ -13,6 +13,89 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @unittest.skipUnless(sys.platform.startswith('linux') and shutil.which('g++'), 'Requires Linux C++')
 class ScreenPreferencesTests(unittest.TestCase):
+    def test_shared_preferences_save_and_restore_without_early_cache(self):
+        source = (ROOT / 'aeraui/platform/aera_backend.cpp').read_text(encoding='utf-8')
+        header = (ROOT / 'aeraui/include/aeraui/backend.hpp').read_text(encoding='utf-8')
+        save = definition(source, 'bool SaveAeraPreferences(bool require_early) {')
+        load = definition(source, 'void LoadAeraPreferencesIfAvailable() {')
+        getters = set(re.findall(r'(Recovery\w+)\(\)', save)) - {'RecoveryScreenTimeout'}
+        stubs = []
+        for getter in sorted(getters):
+            declaration = re.search(r'([^\n;{}]+\b' + getter + r'\(\))\s*;', header)
+            self.assertIsNotNone(declaration, getter)
+            stubs.append(declaration[1].strip() + ' { return {}; }')
+        constants = '\n'.join('constexpr const char* ' + name + ' = "' + name + '";'
+            for name in sorted(set(re.findall(r'DataManager::Get(?:Int|Str)Value\(([A-Z][A-Z0-9_]+)\)', save))))
+        parts = [definition(source, 'struct EarlyUiPreferences') + ';']
+        for name in ('bool ParseInteger(', 'bool ValidPlainText(', 'bool ValidLanguage(',
+                     'bool ValidAccent(', 'bool SetEarlyUiValue('):
+            parts.append(definition(source, name))
+        parts.append('\n'.join(re.findall(r'constexpr int kDockLayoutMax[^;]+;', source)))
+        # The codec's bound must precede its use.
+        parts = [parts[-1]] + parts[:-1]
+        program = '''#include <algorithm>
+#include <cassert>
+#include <cerrno>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include "aeraui/backend.hpp"
+using namespace aeraui;
+struct DataManager {
+  static inline int timeout = 60;
+  static int GetIntValue(const char* key) {
+    return std::string(key)=="tw_screen_timeout_secs" ? timeout : 0;
+  }
+  static std::string GetStrValue(const char*) { return ""; }
+  static void SetValue(const char* key, int value) {
+    if (std::string(key)=="tw_screen_timeout_secs") timeout=value;
+  }
+  static void SetValue(const char* key, const std::string& value) { SetValue(key, atoi(value.c_str())); }
+};
+struct TWFunc { static bool Recursive_Mkdir(const char*, bool) { return true; } };
+#define LOGINFO(...) ((void)0)
+#define LOGERR(...) ((void)0)
+namespace aeraui {
+''' + constants + '\n' + '\n'.join(parts) + '\n' + '\n'.join(stubs) + '''
+std::string kAeraPreferencesPath;
+constexpr const char* kFastbootWifiPreference = "fastboot_wifi";
+EarlyUiPreferences gEarlyDefaults{};
+void CaptureEarlyDefaultsIfNeeded() { gEarlyDefaults.screen_timeout=60; }
+void LoadEarlyUiPreferencesIfAvailable() {}
+bool SaveEarlyUiPreferences() { return false; } // Device has no early cache.
+void ApplyEarlyUiSideEffects() {}
+void ApplyEarlyUiPreferences(const EarlyUiPreferences& values) { DataManager::timeout=values.screen_timeout; }
+int RecoveryScreenTimeout() { return DataManager::timeout; }
+bool WriteFileAtomically(const std::string& path, const std::string& contents) {
+  std::ofstream file(path); file << contents; return static_cast<bool>(file);
+}
+''' + save + '\n' + load + '''
+}
+int main(int argc, char** argv) {
+  assert(argc==3);
+  kAeraPreferencesPath=argv[1];
+  const int chosen=atoi(argv[2]);
+  DataManager::timeout=chosen;
+  assert(SaveAeraPreferences(false));
+  std::ifstream file(kAeraPreferencesPath);
+  const std::string contents((std::istreambuf_iterator<char>(file)), {});
+  assert(contents.find("screen_timeout="+std::to_string(chosen)+"\\n")!=std::string::npos);
+  DataManager::timeout=60;
+  LoadAeraPreferencesIfAvailable();
+  assert(DataManager::timeout==chosen);
+}
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            (folder / 'shared.cpp').write_text(program, encoding='utf-8')
+            result = subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                '-I', str(ROOT / 'aeraui/include'), str(folder / 'shared.cpp'),
+                '-o', str(folder / 'shared')], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for seconds in (0, 15, 30, 60, 600, 3600):
+                subprocess.run([str(folder / 'shared'), str(folder / 'preferences.conf'), str(seconds)],
+                               check=True, timeout=5)
+
     def test_timeout_roundtrip_legacy_defaults_and_device_opt_out(self):
         source = (ROOT / 'aeraui/platform/aera_backend.cpp').read_text(encoding='utf-8')
         pieces = [definition(source, 'struct EarlyUiPreferences') + ';']
