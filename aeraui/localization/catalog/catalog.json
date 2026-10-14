@@ -60475,6 +60475,21 @@
     "Enter your recovery password.": {"zh_CN": "请输入 Recovery 密码。", "zh_TW": "請輸入 Recovery 密碼。"},
     "Could not verify the password.": {"zh_CN": "无法验证密码。", "zh_TW": "無法驗證密碼。"},
     "Turn off the display after inactivity. Press Power to wake and unlock.": {"zh_CN": "闲置后关闭屏幕。按电源键唤醒并解锁。", "zh_TW": "閒置後關閉螢幕。按電源鍵喚醒並解鎖。"},
-    "Restore default preferences? Theme, language, Wi-Fi, plugin settings and the screen lock password are kept.": {"zh_CN": "恢复默认偏好设置？主题、语言、Wi-Fi、插件设置和锁屏密码将保留。", "zh_TW": "還原預設偏好設定？主題、語言、Wi-Fi、外掛程式設定及鎖定螢幕密碼將保留。"}
+    "Restore default preferences? Theme, language, Wi-Fi, plugin settings and the screen lock password are kept.": {"zh_CN": "恢复默认偏好设置？主题、语言、Wi-Fi、插件设置和锁屏密码将保留。", "zh_TW": "還原預設偏好設定？主題、語言、Wi-Fi、外掛程式設定及鎖定螢幕密碼將保留。"},
+    "Change filesystem": {"zh_CN": "更改文件系统", "zh_TW": "變更檔案系統"},
+    "Choose filesystem": {"zh_CN": "选择文件系统", "zh_TW": "選擇檔案系統"},
+    "Choose a partition to format. All its data will be erased.": {"zh_CN": "选择要格式化的分区。该分区的所有数据将被删除。", "zh_TW": "選擇要格式化的分割區。該分割區的所有資料將被刪除。"},
+    "Only filesystems supported by this recovery are listed. Your ROM must support your choice too.": {"zh_CN": "仅列出此 Recovery 支持的文件系统。您的 ROM 也必须支持所选文件系统。", "zh_TW": "僅列出此 Recovery 支援的檔案系統。您的 ROM 也必須支援所選檔案系統。"},
+    "No format targets": {"zh_CN": "没有可格式化的分区", "zh_TW": "沒有可格式化的分割區"},
+    "No writable partitions have a supported formatter and kernel filesystem.": {"zh_CN": "没有可写分区同时具备支持的格式化工具和内核文件系统。", "zh_TW": "沒有可寫入分割區同時具備支援的格式化工具及核心檔案系統。"},
+    "%s: %s \u2192 %s": {"zh_CN": "%s：%s → %s", "zh_TW": "%s：%s → %s"},
+    "Formatting deletes everything on this partition, including internal storage on /data.\n\nThis cannot be undone.": {"zh_CN": "格式化会删除此分区上的所有内容，/data 分区包括内部存储。\n\n此操作无法撤销。", "zh_TW": "格式化會刪除此分割區上的所有內容，/data 分割區包含內部儲存空間。\n\n此操作無法復原。"},
+    "Your ROM must support the selected filesystem. Formatting /data also resets storage encryption.": {"zh_CN": "您的 ROM 必须支持所选文件系统。格式化 /data 还会重置存储加密。", "zh_TW": "您的 ROM 必須支援所選檔案系統。格式化 /data 也會重設儲存空間加密。"},
+    "Type yes to enable formatting": {"zh_CN": "输入 yes 以启用格式化", "zh_TW": "輸入 yes 以啟用格式化"},
+    "Format partition now": {"zh_CN": "立即格式化分区", "zh_TW": "立即格式化分割區"},
+    "Preparing filesystem format": {"zh_CN": "正在准备格式化文件系统", "zh_TW": "正在準備格式化檔案系統"},
+    "Formatting %s": {"zh_CN": "正在格式化 %s", "zh_TW": "正在格式化 %s"},
+    "Creating the selected filesystem. All data on this partition is being erased.": {"zh_CN": "正在创建所选文件系统。此分区上的所有数据正在被删除。", "zh_TW": "正在建立所選檔案系統。此分割區上的所有資料正在被刪除。"},
+    "Keep the device powered on until formatting completes.": {"zh_CN": "请保持设备开机，直到格式化完成。", "zh_TW": "請保持裝置開機，直到格式化完成。"}
   }
 }

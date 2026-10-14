@@ -153,6 +153,21 @@ is still blocked pending a compatible isolated launcher and device validation;
 this is not a functioning browser yet. See
 `browser/README.md` for implemented pieces, tests and remaining launch gates.
 
+## Filesystem selection
+
+Wipe includes **Change filesystem** for writable data, cache, sd-ext and removable
+storage partitions. Choices require both a native formatter and a filesystem
+registered by the running kernel. Device-forced data formats remain enforced;
+logical Android volumes and firmware/metadata partitions are excluded.
+
+The confirmation shows the partition and old/new filesystem. Typing `yes` enables
+the format button; typing or pressing Enter never starts a format. An explicit
+format erases the entire selected volume, including internal storage on `/data`.
+Data uses the existing encryption-reset and metadata cleanup routines. Other
+targets use the native formatters with file-deletion fallback disabled. The ROM
+must also support the chosen filesystem. Host tests use fake partitions; no
+physical formatting has been tested for this feature.
+
 ## Size policy
 
 The UI uses built-in fonts and vector primitives by default. Large PNG sequences,

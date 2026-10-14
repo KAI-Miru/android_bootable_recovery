@@ -351,6 +351,17 @@ std::vector<Volume> RecoveryVolumes(const std::string &kind) {
   return result;
 }
 
+std::vector<FilesystemVolume> RecoveryFilesystemVolumes() {
+  std::vector<FilesystemVolume> result;
+  for (const auto& volume : RecoveryVolumes("wipe")) {
+    auto* part = PartitionManager.Find_Partition_By_Path(volume.path);
+    if (!part || part->Get_Mount_Point() != volume.path) continue;
+    const auto choices = part->Format_File_Systems();
+    if (!choices.empty()) result.push_back({volume.name, volume.path, part->Current_File_System, choices});
+  }
+  return result;
+}
+
 static std::map<std::string, images::Block> NamedImageBlocks() {
   std::map<std::string, images::Block> blocks;
   for (const char *root : {"/dev/block/by-name", "/dev/block/bootdevice/by-name"}) {
@@ -947,6 +958,7 @@ payload::FlashProgressStore gPayloadProgress;
 PayloadFlashProgress RecoveryPayloadFlashProgress() { return gPayloadProgress.Read(); }
 int RecoveryRunJob(const JobRequest &request) {
   if (request.job == Job::kFormatData && !FormatDataAuthorized(request)) return 1;
+  if (request.job == Job::kChangeFilesystem && !FilesystemFormatAuthorized(request)) return 1;
   if (request.job == Job::kClearSnapshotCow &&
       !SnapshotCowCleanupAuthorized(request)) return 1;
   gPayloadProgress.Reset();
@@ -1506,8 +1518,16 @@ int RecoveryRunJob(const JobRequest &request) {
     TWFunc::SetPerformanceMode(false);
     return result;
   }
-  if (request.job == Job::kFormatData) {
-    DataManager::SetValue("tw_partition", "/data");
+  if (request.job == Job::kFormatData || request.job == Job::kChangeFilesystem) {
+    if (request.job == Job::kChangeFilesystem) {
+      const auto available = RecoveryFilesystemVolumes();
+      const auto found = std::find_if(available.begin(), available.end(), [&](const FilesystemVolume& v) {
+        return v.path == request.path && std::find(v.filesystems.begin(), v.filesystems.end(),
+                                                request.filesystem) != v.filesystems.end();
+      });
+      if (found == available.end()) return 1;
+    }
+    DataManager::SetValue("tw_partition", request.path);
     char fastboot_mode[PROPERTY_VALUE_MAX] = {};
     property_get(TW_FASTBOOT_MODE_PROP, fastboot_mode, "0");
     const bool restore_fastboot = fastboot_mode[0] == '1' &&
@@ -1520,7 +1540,9 @@ int RecoveryRunJob(const JobRequest &request) {
       usleep(300000);
     }
     TWFunc::SetPerformanceMode(true);
-    const int result = PartitionManager.Format_Data() ? 0 : 1;
+    const int result = (request.job == Job::kChangeFilesystem
+        ? PartitionManager.Format_By_Path(request.path, request.filesystem)
+        : PartitionManager.Format_Data()) ? 0 : 1;
     PartitionManager.Update_System_Details();
     TWFunc::SetPerformanceMode(false);
     if (restore_fastboot) property_set("sys.usb.config", "fastboot");

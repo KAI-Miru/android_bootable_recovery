@@ -210,6 +210,13 @@ std::vector<Volume> RecoveryVolumes(const std::string &kind) {
     {"Boot","/boot",100663296},{"DTBO","/dtbo",25165824},{"EFS","/efs",12648448},{"Init Boot","/init_boot",8388608},{"Modem","/modem",446693376}};
 }
 std::vector<Volume> RecoveryRestoreVolumes(const std::string &) { return RecoveryVolumes(""); }
+static bool filesystem_targets_available = true;
+std::vector<FilesystemVolume> RecoveryFilesystemVolumes() {
+  return filesystem_targets_available
+      ? std::vector<FilesystemVolume>{{"Data", "/data", "ext4", {"ext4", "f2fs"}},
+                                      {"USB OTG", "/usb_otg", "vfat", {"vfat", "ext4"}}}
+      : std::vector<FilesystemVolume>{};
+}
 std::string RecoveryStorage() { return file_root.empty() ? "/tmp" : file_root; }
 std::string RecoveryBackupRoot() { return backup_root; }
 bool RecoveryDeleteBackup(const std::string &) { return true; }
@@ -569,6 +576,53 @@ int main(int argc,char **argv) {
     assert(png_image_write_to_file(&image,path,0,frame.data(),0,nullptr));
   };
   auto *screen=lv_screen_active();
+  if (!strcmp(argv[1], "--filesystem-format")) {
+    for (const char* language : {"en", "zh_CN", "zh_TW"})
+      for (bool landscape : {false, true}) {
+        assert(i18n::SetLanguage(language));
+        if (strcmp(language, "en")) {
+          assert(strcmp(i18n::Translate("Change filesystem"), "Change filesystem"));
+          assert(strcmp(i18n::Translate("Format partition now"), "Format partition now"));
+        }
+        lv_display_set_resolution(display, landscape ? 3168 : 1440, landscape ? 1440 : 3168);
+        auto* wipe = lv_obj_create(nullptr); BuildToolScene(wipe, Action::kWipe, RecordAction, nullptr);
+        lv_screen_load(wipe); Tick(2);
+        auto* change = Find(wipe, i18n::Translate("Change filesystem")); assert(change);
+        lv_obj_send_event(change, LV_EVENT_CLICKED, nullptr); Tick(2);
+        auto* data = Find(lv_obj_get_child(wipe, -1), "Data"); assert(data); lv_obj_send_event(data, LV_EVENT_CLICKED, nullptr); Tick(2);
+        auto* f2fs = Find(wipe, "f2fs"); assert(f2fs); lv_obj_send_event(f2fs, LV_EVENT_CLICKED, nullptr); Tick(2);
+        auto* input = FindType(wipe, &lv_textarea_class);
+        auto* submit = Find(wipe, i18n::Translate("Format partition now")); assert(input && submit);
+        callback_count = 0;
+        for (const char* bad : {"", "YES", "yesplease", " yes", "yes "}) {
+          lv_textarea_set_text(input, bad);
+          assert(lv_obj_has_state(submit, LV_STATE_DISABLED));
+          lv_obj_send_event(submit, LV_EVENT_CLICKED, nullptr); assert(callback_count == 0);
+        }
+        lv_textarea_set_text(input, "yes"); assert(!lv_obj_has_state(submit, LV_STATE_DISABLED));
+        lv_obj_send_event(FindType(wipe, &lv_keyboard_class), LV_EVENT_READY, nullptr);
+        assert(callback_count == 0);
+        Tick(2);
+        lv_area_t bounds{}; lv_obj_get_coords(submit, &bounds);
+        assert(bounds.x1 >= 0 && bounds.y1 >= 0 && bounds.x2 < lv_display_get_horizontal_resolution(display) &&
+               bounds.y2 < lv_display_get_vertical_resolution(display));
+        const auto filename = std::string("/tmp/aera-filesystem-") + language + (landscape ? "-landscape.png" : "-portrait.png");
+        save(filename.c_str());
+        lv_obj_send_event(submit, LV_EVENT_CLICKED, nullptr); assert(callback_count == 1);
+        const auto request = GetJobRequest();
+        assert(FilesystemFormatAuthorized(request) && request.path == "/data" && request.filesystem == "f2fs");
+        lv_obj_send_event(submit, LV_EVENT_CLICKED, nullptr); assert(callback_count == 1);
+        lv_screen_load(screen); lv_obj_delete(wipe);
+      }
+    i18n::SetLanguage("en"); filesystem_targets_available = false;
+    auto* wipe = lv_obj_create(nullptr); BuildToolScene(wipe, Action::kWipe, RecordAction, nullptr);
+    lv_screen_load(wipe); Tick(2);
+    lv_obj_send_event(Find(wipe, "Change filesystem"), LV_EVENT_CLICKED, nullptr); Tick(2);
+    assert(Find(wipe, "No format targets"));
+    lv_screen_load(screen); lv_obj_delete(wipe);
+    puts("Filesystem selection, typed confirmation, no keyboard auto-format and English/Chinese layouts passed.");
+    return 0;
+  }
   if (!strcmp(argv[1], "--screen-lock")) {
     for (const char* language : {"en", "zh_CN", "zh_TW"})
       for (const bool landscape : {false, true}) {

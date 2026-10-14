@@ -152,6 +152,8 @@ public:
 	bool BlkDiscard();                                                        // Clear the partition using BLKDISCARD ioctl
 	bool Wipe(string New_File_System);                                        // Wipes the partition
 	bool Wipe();                                                              // Wipes the partition
+	std::vector<string> Format_File_Systems();                                 // Available native formatters and kernel filesystems
+	bool Format_File_System(const string& filesystem);                        // Full format, never a file-deletion fallback
 	bool Wipe_AndSec();                                                       // Wipes android secure
 	bool Wipe_Data_Cache();                                                   // Wipe /data/cache with devices that have no cache partition
 	bool Can_Repair();                                                        // Checks to see if we have everything needed to be able to repair the current file system
@@ -164,7 +166,7 @@ public:
 	unsigned long long Get_Restore_Size(PartitionSettings *part_settings);    // Returns the overall restore size of the backup
 	string Backup_Method_By_Name();                                           // Returns a string of the backup method for human readable output
 	bool Decrypt(string Password);                                            // Decrypts the partition, return 0 for failure and -1 for success
-	bool Wipe_Encryption();                                                   // Ignores wipe commands for /data/media devices and formats the original block device
+	bool Wipe_Encryption(const string& filesystem = "");                       // Full data format; optional explicit filesystem
 	void Check_FS_Type();                                                     // Checks the fs type using blkid, does not do anything on MTD / yaffs2 because this crashes on some devices
 	bool Update_Size(bool Display_Error);                                     // Updates size information
 	void Recreate_Media_Folder();                                             // Recreates the /data/media folder
@@ -399,7 +401,8 @@ public:
 	int Wipe_Rotate_Data();                                                   // Wipes rotation data --
 	int Wipe_Battery_Stats();                                                 // Wipe battery stats -- /data/system/batterystats.bin
 	int Wipe_Android_Secure();                                                // Wipes android secure
-	int Format_Data();                                                        // Really formats data on /data/media devices -- also removes encryption
+	int Format_Data(const string& filesystem = "");                            // Really formats data and removes encryption
+	int Format_By_Path(const string& path, const string& filesystem);           // Validated explicit filesystem format
 	int Wipe_Media_From_Data();                                               // Removes and recreates the media folder on /data/media devices
 	int Repair_By_Path(string Path, bool Display_Error);                      // Repairs a partition based on path
 	int Resize_By_Path(string Path, bool Display_Error);                      // Resizes a partition based on path

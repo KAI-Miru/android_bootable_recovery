@@ -21,7 +21,8 @@ enum class Job {
   kFormatData,
   kClearSnapshotCow,
   kRootOperation,
-  kPcBackupOperation
+  kPcBackupOperation,
+  kChangeFilesystem
 };
 struct Volume {
   std::string name;
@@ -63,6 +64,7 @@ struct JobRequest {
   bool payload_direct = false;
   bool payload_full = false; // Every image is mandatory except explicitly protected partitions.
   bool payload_override_protection = false; // Explicit manual Advanced selection only.
+  std::string filesystem;
 };
 inline bool PayloadTargetMatches(const std::string &name, const std::string &path) {
   return path == "/" + name || (name == "system" && path == "/system_root");
@@ -75,6 +77,15 @@ inline bool SnapshotCowCleanupAuthorized(const JobRequest &request) {
   return request.job == Job::kClearSnapshotCow && request.path.empty() &&
          request.partitions.empty() && request.confirmation == "remove-cow";
 }
+inline bool FilesystemFormatAuthorized(const JobRequest& request) {
+  return request.job == Job::kChangeFilesystem && request.confirmation == "yes" &&
+      request.partitions.empty() && !request.path.empty() && !request.filesystem.empty();
+}
+struct FilesystemVolume {
+  std::string name, path, current;
+  std::vector<std::string> filesystems;
+};
+std::vector<FilesystemVolume> RecoveryFilesystemVolumes();
 // Implemented beside the stock GUI bridge, using the same recovery backend.
 std::vector<Volume> RecoveryVolumes(const std::string &kind);
 std::vector<Volume> RecoveryImageVolumes();

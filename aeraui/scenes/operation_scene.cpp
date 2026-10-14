@@ -122,6 +122,7 @@ const char *InitialTitle(Job job) {
     case Job::kRestore: return "Preparing to restore";
     case Job::kWipe: return "Preparing to wipe";
     case Job::kFormatData: return "Preparing data format";
+    case Job::kChangeFilesystem: return "Preparing filesystem format";
     case Job::kClearSnapshotCow: return "Preparing snapshot cleanup";
     case Job::kMount: return "Mounting storage";
     case Job::kUnmount: return "Unmounting storage";
@@ -142,6 +143,7 @@ const char *OperationSymbol(Job job) {
     case Job::kRestore: return LV_SYMBOL_REFRESH;
     case Job::kWipe:
     case Job::kFormatData:
+    case Job::kChangeFilesystem:
     case Job::kClearSnapshotCow: return LV_SYMBOL_TRASH;
     case Job::kMount:
     case Job::kUnmount: return LV_SYMBOL_DRIVE;
@@ -305,6 +307,11 @@ FriendlyProgress Explain(const std::string &raw, Job job, int progress) {
     value.activity = i18n::Format(
         "Restoring files for %s. Do not reboot during this operation.",
         subject.c_str());
+    value.step = progress > 1 ? 1 : 0;
+  } else if (job == Job::kChangeFilesystem) {
+    value.title = i18n::Format("Formatting %s", subject.c_str());
+    value.explanation = "Creating the selected filesystem. All data on this partition is being erased.";
+    value.activity = "Keep the device powered on until formatting completes.";
     value.step = progress > 1 ? 1 : 0;
   } else if (job == Job::kFormatData || all.find("format") != std::string::npos) {
     value.title = "Formatting data";
@@ -548,7 +555,8 @@ OperationScene BuildJobScene(lv_obj_t *screen, const JobRequest &request,
   result.pc_restore = request.backup_action == "restore";
   result.pc_app_backup = request.job == Job::kPcBackupOperation && request.backup_kind == "apps";
   result.payload_parallel = request.job == Job::kFlashPayload && request.payload_direct;
-  result.format_data = request.job == Job::kFormatData;
+  result.format_data = request.job == Job::kFormatData ||
+      (request.job == Job::kChangeFilesystem && request.path == "/data");
   const bool installer =
       request.job == Job::kInstall || request.job == Job::kSideload;
   result.indeterminate_progress = request.job == Job::kSideload;
@@ -830,9 +838,9 @@ OperationScene BuildJobScene(lv_obj_t *screen, const JobRequest &request,
 
   const bool backup = request.job == Job::kBackup ||
       request.job == Job::kUploadBackup || request.job == Job::kRestore;
-  const bool format = request.job == Job::kFormatData;
+  const bool format = result.format_data;
   const bool wipe = request.job == Job::kWipe ||
-      request.job == Job::kClearSnapshotCow;
+      request.job == Job::kClearSnapshotCow || request.job == Job::kChangeFilesystem;
   const bool mount = request.job == Job::kMount || request.job == Job::kUnmount;
   result.done = Button(screen,
       format ? "Reboot options" : backup ? "Back to backups" : wipe ? "Back to wipe" : "Done",

@@ -37,6 +37,10 @@
 #include <pwd.h>
 #include <zlib.h>
 #include <sstream>
+#include <fstream>
+#include <algorithm>
+#include <utility>
+#include "aera_filesystem_format.hpp"
 #include <android-base/properties.h>
 #include <libsnapshot/snapshot.h>
 
@@ -1889,6 +1893,63 @@ bool TWPartition::BlkDiscard() {
 	return (TWFunc::Exec_Cmd(cmd) == 0);
 }
 
+std::vector<string> TWPartition::Format_File_Systems() {
+	aera_format::Capabilities c;
+	c.path = Mount_Point;
+	c.present = Is_Present;
+	c.writable = Can_Be_Wiped && Wipe_Available_in_GUI && !Mount_Read_Only;
+	c.logical = Is_Super;
+	c.removable = Removable;
+	c.storage = Is_Storage;
+	c.rm_rf_only = Use_Rm_Rf;
+	c.subpartition = Is_SubPartition || Has_SubPartition;
+#if defined(OF_FORCE_DATA_FORMAT_F2FS)
+	c.forced_data = "f2fs";
+#elif defined(OF_FORCE_DATA_FORMAT_EXT4)
+	c.forced_data = "ext4";
+#endif
+	std::ifstream proc("/proc/filesystems");
+	string line;
+	while (std::getline(proc, line)) {
+		std::istringstream fields(line);
+		string field, fs;
+		while (fields >> field) fs = field;
+		if (!fs.empty()) c.kernel.push_back(fs);
+	}
+	if (access("/system/bin/mke2fs", X_OK) == 0) {
+		c.formatters.insert(c.formatters.end(), {"ext2", "ext3", "ext4"});
+	}
+#ifdef USE_EXT4
+	if (std::find(c.formatters.begin(), c.formatters.end(), "ext4") == c.formatters.end())
+		c.formatters.push_back("ext4");
+#endif
+	for (const auto& pair : std::vector<std::pair<string, string>>{
+		{"f2fs", "/system/bin/make_f2fs"}, {"vfat", "/system/bin/mkfs.fat"},
+		{"exfat", "/system/bin/mkexfatfs"}, {"ntfs", "/system/bin/mkntfs"}})
+		if (access(pair.second.c_str(), X_OK) == 0) c.formatters.push_back(pair.first);
+	if (access("/system/bin/mkfs.ntfs", X_OK) == 0 &&
+	    std::find(c.formatters.begin(), c.formatters.end(), "ntfs") == c.formatters.end())
+		c.formatters.push_back("ntfs");
+	return aera_format::Filesystems(c);
+}
+
+bool TWPartition::Format_File_System(const string& filesystem) {
+	const auto choices = Format_File_Systems();
+	if (std::find(choices.begin(), choices.end(), filesystem) == choices.end()) return false;
+	const bool saved_media = Has_Data_Media;
+	const string saved_fs = Current_File_System;
+	const int saved_rm_rf = DataManager::GetIntValue(TW_RM_RF_VAR);
+	// An explicit format must not become a media-preserving wipe or rm -rf.
+	Has_Data_Media = false;
+	Current_File_System = filesystem;
+	DataManager::SetValue(TW_RM_RF_VAR, 0);
+	const bool okay = Wipe(filesystem);
+	DataManager::SetValue(TW_RM_RF_VAR, saved_rm_rf);
+	Has_Data_Media = saved_media;
+	Current_File_System = okay ? filesystem : saved_fs;
+	return okay;
+}
+
 bool TWPartition::Wipe(string New_File_System) {
 	bool wiped = false, update_crypt = false, recreate_media = true;
 	int check;
@@ -2266,7 +2327,7 @@ bool TWPartition::Decrypt(string Password) {
 	return 1;
 }
 
-bool TWPartition::Wipe_Encryption() {
+bool TWPartition::Wipe_Encryption(const string& filesystem) {
 	bool Save_Data_Media = Has_Data_Media;
 	bool ret = false;
 	std::string the_wipe_fs;
@@ -2281,6 +2342,11 @@ bool TWPartition::Wipe_Encryption() {
 #else
 	the_wipe_fs = Fstab_File_System;
 #endif
+	if (!filesystem.empty()) {
+		const auto choices = Format_File_Systems();
+		if (std::find(choices.begin(), choices.end(), filesystem) == choices.end()) return false;
+		the_wipe_fs = filesystem;
+	}
 	BasePartition* base_partition = make_partition();
 
 	if (!base_partition->PreWipeEncryption())
@@ -2313,7 +2379,7 @@ bool TWPartition::Wipe_Encryption() {
 	gui_print("DEBUG: Format_Target_File_System=%s\n", the_wipe_fs.c_str());
 #endif
 
-	if (Wipe(the_wipe_fs)) {
+	if (filesystem.empty() ? Wipe(the_wipe_fs) : Format_File_System(the_wipe_fs)) {
 		Has_Data_Media = Save_Data_Media;
 		DataManager::SetValue(TW_IS_ENCRYPTED, 0);
 #ifndef TW_OEM_BUILD

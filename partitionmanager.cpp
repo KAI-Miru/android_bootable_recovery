@@ -2427,11 +2427,26 @@ static void Update_Encryption_Props_Before_Format() {
 	}
 }
 
-int TWPartitionManager::Format_Data(void) {
+int TWPartitionManager::Format_By_Path(const string& path, const string& filesystem) {
+	if (TWFunc::Block_Operations_Until_Reboot()) return false;
+	TWPartition* part = Find_Partition_By_Path(path);
+	// Find_Partition_By_Path also accepts children; a format needs an exact mount point.
+	if (!part || part->Mount_Point != path) return false;
+	const auto choices = part->Format_File_Systems();
+	if (std::find(choices.begin(), choices.end(), filesystem) == choices.end()) return false;
+	return path == "/data" ? Format_Data(filesystem) : part->Format_File_System(filesystem);
+}
+
+int TWPartitionManager::Format_Data(const string& filesystem) {
 	if (TWFunc::Block_Operations_Until_Reboot())
 		return false;
 	TWPartition* dat = Find_Partition_By_Path("/data");
 	TWPartition* metadata = Find_Partition_By_Path("/metadata");
+	if (!filesystem.empty()) {
+		if (!dat) return false;
+		const auto choices = dat->Format_File_Systems();
+		if (std::find(choices.begin(), choices.end(), filesystem) == choices.end()) return false;
+	}
 	bool ret = false;
 	if (metadata != NULL)
 		metadata->UnMount(false);
@@ -2450,7 +2465,7 @@ int TWPartitionManager::Format_Data(void) {
 			if (!Check_Pending_Merges())
 				return false;
 		}
-		ret = dat->Wipe_Encryption();
+		ret = dat->Wipe_Encryption(filesystem);
 	} else {
 		gui_msg(Msg(msg::kError, "unable_to_locate=Unable to locate {1}.")("/data"));
 		return false;

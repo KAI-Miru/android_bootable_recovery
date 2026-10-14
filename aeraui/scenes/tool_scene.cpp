@@ -62,6 +62,7 @@ lv_obj_t *WorkflowModeCard(lv_obj_t *parent, int x, int y, int width,
 void RestoreFolders(Tools *state);
 std::string SnapshotCowDetail(const SnapshotCowStatus &status);
 void ConfirmSnapshotCowCleanup(Tools *state);
+void ChooseFilesystem(Tools *state);
 
 void Open(Tools *state, Action action) { state->callback(action, state->context); }
 bool AutoSaveSettings(Tools *state) {
@@ -784,6 +785,11 @@ void WipeTabs(Tools *state) {
                    landscape ? 470 : 662, LV_SYMBOL_TRASH, "Format Data",
                    "Erase internal storage and reset encryption.", format,
                    [state] { Open(state, Action::kFormatData); });
+  if (!format) {
+    auto* filesystems = Button(state->screen, "Change filesystem", [state] { ChooseFilesystem(state); });
+    lv_obj_set_pos(filesystems, 80, landscape ? 560 : 680);
+    lv_obj_set_size(filesystems, landscape ? 940 : 1280, 104);
+  }
 }
 
 std::string SnapshotCowDetail(const SnapshotCowStatus &status) {
@@ -832,32 +838,39 @@ void UpdateFormatConfirmation(Tools *state) {
   lv_obj_set_style_text_color(text, confirmed ? kText : kMuted, 0);
 }
 
-void BuildFormatData(Tools *state, bool fastboot_mode = false) {
-  Header(state->screen, fastboot_mode ? "Fastbootd · Format Data" : "Wipe",
+void BuildFormatData(Tools *state, bool fastboot_mode = false,
+                     const JobRequest& format_request = {}, const std::string& current_fs = {}) {
+  const bool filesystem = format_request.job == Job::kChangeFilesystem;
+  Header(state->screen, filesystem ? "Change filesystem" : fastboot_mode ? "Fastbootd · Format Data" : "Wipe",
          fastboot_mode
              ? "Erase encrypted internal storage while userspace fastboot remains active."
              : "Erase selected partitions or format internal storage.",
-         fastboot_mode ? nullptr : state->callback,
-         fastboot_mode ? nullptr : state->context);
-  if (!fastboot_mode) WipeTabs(state);
+         fastboot_mode || filesystem ? nullptr : state->callback,
+         fastboot_mode || filesystem ? nullptr : state->context);
+  if (!fastboot_mode && !filesystem) WipeTabs(state);
   const bool landscape = Landscape(state->screen);
-  const int mode_offset = fastboot_mode ? 0 : (landscape ? 80 : 56);
-  auto *title = Label(state->screen, "Erase all internal data", &lv_font_montserrat_48, kRed);
+  const int mode_offset = fastboot_mode || filesystem ? 0 : (landscape ? 80 : 56);
+  const std::string heading = filesystem
+      ? i18n::Format("%s: %s → %s", format_request.path.c_str(), current_fs.c_str(), format_request.filesystem.c_str())
+      : i18n::Translate("Erase all internal data");
+  auto *title = Label(state->screen, heading.c_str(), &lv_font_montserrat_48, kRed);
   lv_obj_set_pos(title, 80, (landscape ? 480 : 654) + mode_offset);
-  auto *warning = Label(state->screen,
-      "Formatting /data deletes apps, files, photos, videos\n"
+  auto *warning = Label(state->screen, filesystem
+      ? "Formatting deletes everything on this partition, including internal storage on /data.\n\nThis cannot be undone."
+      : "Formatting /data deletes apps, files, photos, videos\n"
       "and backups stored in internal storage.\n\n"
       "This cannot be undone.", &lv_font_montserrat_32, kText);
   lv_obj_set_pos(warning, 80, (landscape ? 560 : 744) + mode_offset);
   lv_obj_set_width(warning, landscape ? 980 : 1270);
   lv_obj_set_style_text_line_space(warning, 12, 0);
-  auto *encryption = Label(state->screen,
-      "Resets storage encryption; Android may encrypt it again.\n"
+  auto *encryption = Label(state->screen, filesystem
+      ? "Your ROM must support the selected filesystem. Formatting /data also resets storage encryption."
+      : "Resets storage encryption; Android may encrypt it again.\n"
       "Adopted storage, if present, may also be erased.", &lv_font_montserrat_24, kMutedStrong);
   lv_obj_set_pos(encryption, 80, (landscape ? 770 : 1040) + mode_offset);
   lv_obj_set_width(encryption, landscape ? 980 : 1270);
   lv_obj_set_style_text_line_space(encryption, 12, 0);
-  auto *prompt = Label(state->screen, "Type yes to enable Format Data", &lv_font_montserrat_32, kText);
+  auto *prompt = Label(state->screen, filesystem ? "Type yes to enable formatting" : "Type yes to enable Format Data", &lv_font_montserrat_32, kText);
   lv_obj_set_pos(prompt, 80, (landscape ? 900 : 1228) + mode_offset);
   state->format_input = TextArea(state->screen);
   lv_obj_set_pos(state->format_input, 80,
@@ -888,11 +901,13 @@ void BuildFormatData(Tools *state, bool fastboot_mode = false) {
   lv_keyboard_set_mode(keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
   lv_keyboard_set_textarea(keyboard, state->format_input);
 
-  state->format_submit = Button(state->screen, "Format data now", [state] {
-    JobRequest request;
-    request.job = Job::kFormatData; request.title = "Format Data"; request.path = "/data";
+  state->format_submit = Button(state->screen, filesystem ? "Format partition now" : "Format data now", [state, filesystem, format_request] {
+    JobRequest request = format_request;
+    if (!filesystem) {
+      request.job = Job::kFormatData; request.title = "Format Data"; request.path = "/data";
+    }
     request.confirmation = lv_textarea_get_text(state->format_input);
-    if (!FormatDataAuthorized(request)) return;
+    if (filesystem ? !FilesystemFormatAuthorized(request) : !FormatDataAuthorized(request)) return;
     lv_textarea_set_text(state->format_input, "");
     Run(state, request);
   });
@@ -907,12 +922,65 @@ void BuildFormatData(Tools *state, bool fastboot_mode = false) {
     UpdateFormatConfirmation(static_cast<Tools *>(lv_event_get_user_data(event)));
   }, LV_EVENT_VALUE_CHANGED, state);
   // Neither typing nor the keyboard's Enter/Ready action starts a format.
-  auto *cancel = Button(state->screen, "Cancel", [state, fastboot_mode] {
-    Open(state, fastboot_mode ? Action::kBack : Action::kWipe);
+  auto *cancel = Button(state->screen, "Cancel", [state, fastboot_mode, filesystem] {
+    if (filesystem) lv_obj_delete_async(state->screen);
+    else Open(state, fastboot_mode ? Action::kBack : Action::kWipe);
   });
   lv_obj_set_pos(cancel, landscape ? 570 : 80,
                  (landscape ? 1140 : 2770) + (landscape ? mode_offset : 0));
   lv_obj_set_size(cancel, landscape ? 450 : 1280, landscape ? 132 : 112);
+}
+
+lv_obj_t* FilesystemPicker(Tools* state, const char* title, const char* description) {
+  auto* overlay = lv_obj_create(state->screen);
+  Clear(overlay);
+  lv_obj_set_user_data(overlay, &kModalMarker);
+  lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+  MainBackground(overlay);
+  Header(overlay, title, description, nullptr, nullptr);
+  auto* cancel = Button(overlay, "Cancel", [overlay] { lv_obj_delete_async(overlay); });
+  lv_obj_set_size(cancel, Landscape(state->screen) ? 940 : 1280, 112);
+  lv_obj_align(cancel, LV_ALIGN_BOTTOM_MID, 0, -120);
+  return overlay;
+}
+
+void ChooseFilesystem(Tools* state) {
+  const auto volumes = RecoveryFilesystemVolumes();
+  if (volumes.empty()) {
+    Sheet(state->screen, "No format targets", "No writable partitions have a supported formatter and kernel filesystem.");
+    return;
+  }
+  auto* overlay = FilesystemPicker(state, "Change filesystem", "Choose a partition to format. All its data will be erased.");
+  auto* list = Scroll(overlay, Landscape(state->screen) ? 350 : 430, Landscape(state->screen) ? 780 : 2200);
+  for (size_t i = 0; i < volumes.size(); ++i) {
+    const auto volume = volumes[i];
+    Row(list, i * 190, LV_SYMBOL_DRIVE, volume.name,
+        volume.path + " · " + volume.current, [state, overlay, volume] {
+      lv_obj_delete_async(overlay);
+      auto* choices = FilesystemPicker(state, "Choose filesystem", "Only filesystems supported by this recovery are listed. Your ROM must support your choice too.");
+      auto* options = Scroll(choices, Landscape(state->screen) ? 350 : 430, Landscape(state->screen) ? 780 : 2200);
+      for (size_t n = 0; n < volume.filesystems.size(); ++n) {
+        const auto fs = volume.filesystems[n];
+        Row(options, n * 190, LV_SYMBOL_TRASH, fs, volume.path, [state, choices, volume, fs] {
+          lv_obj_delete_async(choices);
+          auto* confirmation = lv_obj_create(state->screen);
+          Clear(confirmation); MainBackground(confirmation);
+          lv_obj_set_user_data(confirmation, &kModalMarker);
+          lv_obj_set_size(confirmation, LV_PCT(100), LV_PCT(100));
+          auto* dialog = new Tools;
+          dialog->screen = confirmation; dialog->tool = Action::kWipe;
+          dialog->callback = state->callback; dialog->context = state->context;
+          lv_obj_add_event_cb(confirmation, [](lv_event_t* e) {
+            delete static_cast<Tools*>(lv_event_get_user_data(e));
+          }, LV_EVENT_DELETE, dialog);
+          JobRequest request;
+          request.job = Job::kChangeFilesystem; request.title = "Change filesystem";
+          request.path = volume.path; request.filesystem = fs;
+          BuildFormatData(dialog, false, request, volume.current);
+        });
+      }
+    });
+  }
 }
 
 lv_obj_t *WorkflowModeCard(lv_obj_t *parent, int x, int y, int width,
@@ -1024,17 +1092,17 @@ void BuildPartitions(Tools *state) {
     WipeTabs(state);
     auto *notice = Label(state->screen,
         "Only selected partitions will be wiped.", &lv_font_montserrat_32, kAmber);
-    lv_obj_set_pos(notice, 80, landscape ? 570 : 690);
+    lv_obj_set_pos(notice, 80, landscape ? 690 : 820);
     lv_obj_set_width(notice, landscape ? 940 : 1250);
     auto *hint = Label(state->screen,
         "To erase all internal data and reset encryption, use Format Data.",
         &lv_font_montserrat_24, kMutedStrong);
-    lv_obj_set_pos(hint, 80, landscape ? 650 : 758);
+    lv_obj_set_pos(hint, 80, landscape ? 760 : 888);
     lv_obj_set_width(hint, landscape ? 940 : 1270);
-    lv_obj_set_pos(state->summary, 80, landscape ? 760 : 866);
+    lv_obj_set_pos(state->summary, 80, landscape ? 850 : 996);
     if (!landscape) {
-      lv_obj_set_pos(state->list, 64, 948);
-      lv_obj_set_height(state->list, 1650);
+      lv_obj_set_pos(state->list, 64, 1078);
+      lv_obj_set_height(state->list, 1520);
     }
   }
   auto *review = Button(state->screen, backup ? "Review backup" :
