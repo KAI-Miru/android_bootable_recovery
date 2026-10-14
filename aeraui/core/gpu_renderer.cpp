@@ -4,11 +4,13 @@
  */
 
 #include "gpu_renderer.hpp"
+#include "required_gpu_libraries.hpp"
 
 #include <android/log.h>
 #include <android/hardware_buffer.h>
 #include <vndk/hardware_buffer.h>
 #include <dlfcn.h>
+#include <cutils/properties.h>
 #include <unistd.h>
 
 #include <cstring>
@@ -114,6 +116,16 @@ bool GpuRenderer::Initialize(int32_t width, int32_t height) {
   Shutdown();
   width_ = width;
   height_ = height;
+
+  char required_libraries[PROPERTY_VALUE_MAX]{};
+  property_get("ro.aera.gpu.required_libraries", required_libraries, "");
+  std::string unavailable;
+  if (!RequiredGpuLibrariesAvailable(required_libraries, &unavailable)) {
+    __android_log_print(ANDROID_LOG_WARN, kLogTag,
+                        "GPU runtime: required library unavailable: %s",
+                        unavailable.c_str());
+    return false;
+  }
 
   egl_library_ = dlopen(kEglDriver, RTLD_NOW | RTLD_GLOBAL);
   if (egl_library_ == nullptr) {
