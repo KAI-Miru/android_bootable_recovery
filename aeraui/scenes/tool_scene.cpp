@@ -845,8 +845,8 @@ void BuildFormatData(Tools *state, bool fastboot_mode = false,
          fastboot_mode
              ? "Erase encrypted internal storage while userspace fastboot remains active."
              : "Erase selected partitions or format internal storage.",
-         fastboot_mode || filesystem ? nullptr : state->callback,
-         fastboot_mode || filesystem ? nullptr : state->context);
+         fastboot_mode ? nullptr : state->callback,
+         fastboot_mode ? nullptr : state->context);
   if (!fastboot_mode && !filesystem) WipeTabs(state);
   const bool landscape = Landscape(state->screen);
   const int mode_offset = fastboot_mode || filesystem ? 0 : (landscape ? 80 : 56);
@@ -937,7 +937,7 @@ lv_obj_t* FilesystemPicker(Tools* state, const char* title, const char* descript
   lv_obj_set_user_data(overlay, &kModalMarker);
   lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
   MainBackground(overlay);
-  Header(overlay, title, description, nullptr, nullptr);
+  Header(overlay, title, description, state->callback, state->context);
   auto* cancel = Button(overlay, "Cancel", [overlay] { lv_obj_delete_async(overlay); });
   lv_obj_set_size(cancel, Landscape(state->screen) ? 940 : 1280, 112);
   lv_obj_align(cancel, LV_ALIGN_BOTTOM_MID, 0, -120);
@@ -961,7 +961,7 @@ void ChooseFilesystem(Tools* state) {
       auto* options = Scroll(choices, Landscape(state->screen) ? 350 : 430, Landscape(state->screen) ? 780 : 2200);
       for (size_t n = 0; n < volume.filesystems.size(); ++n) {
         const auto fs = volume.filesystems[n];
-        Row(options, n * 190, LV_SYMBOL_TRASH, fs, volume.path, [state, choices, volume, fs] {
+        Row(options, n * 190, LV_SYMBOL_DRIVE, fs, volume.path, [state, choices, volume, fs] {
           lv_obj_delete_async(choices);
           auto* confirmation = lv_obj_create(state->screen);
           Clear(confirmation); MainBackground(confirmation);

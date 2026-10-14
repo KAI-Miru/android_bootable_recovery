@@ -143,8 +143,8 @@ const char *OperationSymbol(Job job) {
     case Job::kRestore: return LV_SYMBOL_REFRESH;
     case Job::kWipe:
     case Job::kFormatData:
-    case Job::kChangeFilesystem:
     case Job::kClearSnapshotCow: return LV_SYMBOL_TRASH;
+    case Job::kChangeFilesystem: return LV_SYMBOL_DRIVE;
     case Job::kMount:
     case Job::kUnmount: return LV_SYMBOL_DRIVE;
     case Job::kRootOperation: return LV_SYMBOL_SETTINGS;
@@ -549,7 +549,9 @@ JobRequest GetJobRequest() { return gRequest; }
 
 OperationScene BuildJobScene(lv_obj_t *screen, const JobRequest &request,
                              ActionCallback callback, void *context) {
-  Header(screen, request.title.c_str(), "Progress & activity", nullptr, nullptr);
+  const bool filesystem = request.job == Job::kChangeFilesystem;
+  Header(screen, request.title.c_str(), "Progress & activity",
+         filesystem ? callback : nullptr, filesystem ? context : nullptr);
   OperationScene result;
   result.job = request.job;
   result.pc_restore = request.backup_action == "restore";

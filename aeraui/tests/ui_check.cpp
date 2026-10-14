@@ -591,8 +591,17 @@ int main(int argc,char **argv) {
         lv_screen_load(wipe); Tick(2);
         auto* change = Find(wipe, i18n::Translate("Change filesystem")); assert(change);
         lv_obj_send_event(change, LV_EVENT_CLICKED, nullptr); Tick(2);
+        assert(status_bar_interactive);
+        const auto picture_suffix = std::string(language) + (landscape ? "-landscape.png" : "-portrait.png");
+        save(("/tmp/aera-filesystem-partition-" + picture_suffix).c_str());
         auto* data = Find(lv_obj_get_child(wipe, -1), "Data"); assert(data); lv_obj_send_event(data, LV_EVENT_CLICKED, nullptr); Tick(2);
+        assert(status_bar_interactive);
+        auto* choices = lv_obj_get_child(wipe, -1);
+        assert(!FindLabel(choices, LV_SYMBOL_TRASH));
+        assert(FindLabel(choices, LV_SYMBOL_DRIVE));
+        save(("/tmp/aera-filesystem-chooser-" + picture_suffix).c_str());
         auto* f2fs = Find(wipe, "f2fs"); assert(f2fs); lv_obj_send_event(f2fs, LV_EVENT_CLICKED, nullptr); Tick(2);
+        assert(status_bar_interactive);
         auto* input = FindType(wipe, &lv_textarea_class);
         auto* submit = Find(wipe, i18n::Translate("Format partition now")); assert(input && submit);
         callback_count = 0;
@@ -613,6 +622,11 @@ int main(int argc,char **argv) {
         lv_obj_send_event(submit, LV_EVENT_CLICKED, nullptr); assert(callback_count == 1);
         const auto request = GetJobRequest();
         assert(FilesystemFormatAuthorized(request) && request.path == "/data" && request.filesystem == "f2fs");
+        auto* progress = lv_obj_create(nullptr);
+        const auto operation = BuildJobScene(progress, request, RecordAction, nullptr);
+        assert(operation.job == Job::kChangeFilesystem && status_bar_interactive);
+        assert(FindLabel(progress, LV_SYMBOL_DRIVE) && !FindLabel(progress, LV_SYMBOL_TRASH));
+        lv_obj_delete(progress);
         lv_obj_send_event(submit, LV_EVENT_CLICKED, nullptr); assert(callback_count == 1);
         lv_screen_load(screen); lv_obj_delete(wipe);
       }
