@@ -2,10 +2,10 @@
  * SPDX-License-Identifier: Apache-2.0 */
 #include "scene.hpp"
 #include "phone_keyboard.hpp"
-#include "screen_password.hpp"
 #include "picture_decode.hpp"
 #include "ui_components.hpp"
 #include "circle_battery.hpp"
+#include "lock_icon.hpp"
 #include "partition_layout.hpp"
 #include "wallpaper.hpp"
 #include "root/root_manager.hpp"
@@ -1235,7 +1235,7 @@ void PreferenceColumn(lv_obj_t *object, int gap = 12) {
 
 lv_obj_t *PreferenceEntry(Tools *state, const char *symbol,
                           const char *title, const std::string &description,
-                          Handler action, bool toggle = false) {
+                          Handler action, bool toggle = false, bool lock_icon = false) {
   auto *row = lv_button_create(state->list);
   Clear(row);
   lv_obj_set_style_bg_color(row, kMainSelected, LV_STATE_PRESSED);
@@ -1255,7 +1255,7 @@ lv_obj_t *PreferenceEntry(Tools *state, const char *symbol,
   lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                        LV_FLEX_ALIGN_CENTER);
-  auto *icon = Label(row, symbol, &lv_font_montserrat_32, kAccent);
+  auto *icon = lock_icon ? LockIcon(row, 56) : Label(row, symbol, &lv_font_montserrat_32, kAccent);
   lv_obj_set_width(icon, 56);
   auto *text = lv_obj_create(row);
   Clear(text);
@@ -2457,69 +2457,18 @@ void BuildPreferences(Tools *state) {
     });
   }
 
-  auto* password_lock = PreferenceEntry(state, LV_SYMBOL_KEYBOARD,
-      "Screen lock password", RecoveryScreenLockEnabled() ? "Enabled" : "Off", {});
-  OnClick(password_lock, [state] {
-    const auto change = [state](bool disable) {
-      auto pending = std::make_shared<ScreenPasswordChange>();
-      const auto choose_new = [state, pending] {
-        ScreenPasswordPrompt(state->screen, "New AERA password",
-            "Use at least 8 characters. This password protects the recovery interface only.",
-            [state, pending](const std::string& password, std::string& error) {
-          if (std::count_if(password.begin(), password.end(), [](unsigned char c) {
-                return (c & 0xc0) != 0x80;
-              }) < 8) {
-            error = "Use at least 8 characters."; return false;
-          }
-          pending->replacement = password;
-          ScreenPasswordPrompt(state->screen, "Confirm AERA password", "Enter the new password again.",
-              [state, pending](const std::string& confirmation, std::string& error) {
-            if (confirmation != pending->replacement) {
-              error = "Passwords do not match."; return false;
-            }
-            if (!RecoveryChangeScreenLockPassword(pending->current, pending->replacement)) {
-              error = "Could not save the password. Check that storage is unlocked."; return false;
-            }
-            Open(state, Action::kPreferences);
-            return true;
-          });
-          return true;
-        });
-      };
-      if (!RecoveryScreenLockEnabled()) { choose_new(); return; }
-      ScreenPasswordPrompt(state->screen, "Current AERA password", "Enter your current recovery password.",
-          [state, pending, choose_new, disable](const std::string& current, std::string& error) {
-        if (disable) {
-          if (!RecoveryDisableScreenLock(current)) {
-            error = "Incorrect password or try again later."; return false;
-          }
+  if (RecoveryScreenLockAvailable()) {
+    auto* android_lock = PreferenceEntry(state, LV_SYMBOL_KEYBOARD,
+        "Use Android screen lock", RecoveryScreenLockEnabled() ? "Enabled" : "Off", {}, false, true);
+    OnClick(android_lock, [state] {
+      Sheet(state->screen, "Use Android screen lock",
+            "Use your Android PIN, pattern or password when waking the display.",
+            [state] {
+        if (RecoverySetScreenLockEnabled(!RecoveryScreenLockEnabled()))
           Open(state, Action::kPreferences);
-        } else {
-          // Validate now, and again during the atomic password change.
-          if (!RecoveryVerifyScreenLock(current)) {
-            error = "Incorrect password or try again later."; return false;
-          }
-          RecoveryLockScreen();
-          pending->current = current;
-          choose_new();
-        }
-        return true;
       });
-    };
-    if (!RecoveryScreenLockEnabled()) { change(false); return; }
-    Sheet(state->screen, "Screen lock password", "AERA uses a separate recovery password.",
-          {}, 560, true, SheetPresentation::kStandard, "Swipe to confirm",
-          [state, change](lv_obj_t* area) {
-      lv_obj_set_flex_flow(area, LV_FLEX_FLOW_COLUMN);
-      lv_obj_set_style_pad_row(area, 24, 0);
-      for (const bool disable : {false, true}) {
-        auto* button = Button(area, disable ? "Disable password" : "Change password", [state, change, disable] {
-          DismissModal(state->screen); change(disable);
-        });
-        lv_obj_set_size(button, LV_PCT(100), 116);
-      }
     });
-  });
+  }
 
   PreferenceToggle(state, LV_SYMBOL_BELL, "24-hour clock",
                    "Off uses 12-hour time with AM / PM", Preference::kClock24);
@@ -2641,7 +2590,7 @@ void BuildPreferences(Tools *state) {
 
   auto *reset = Button(state->list, "Reset preferences", [state] {
     Sheet(state->screen, "Reset preferences",
-          "Restore default preferences? Theme, language, Wi-Fi, plugin settings and the screen lock password are kept.",
+          "Restore default preferences? Theme, language, Wi-Fi, plugin settings and Android screen lock are kept.",
           [state] {
             if (!RecoveryResetPreferences()) {
               Sheet(state->screen, "Setting unavailable", "This setting could not be changed.");

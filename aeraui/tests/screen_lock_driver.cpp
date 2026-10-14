@@ -1,70 +1,59 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "aeraui/platform/screen_lock.hpp"
+#include "aeraui/platform/android_screen_credential.hpp"
 #include <cassert>
 #include <chrono>
-#include <filesystem>
-#include <fstream>
-#include <iterator>
-#include <sys/stat.h>
+#include <condition_variable>
+#include <iostream>
+#include <mutex>
 #include <thread>
-#include <unistd.h>
-
+using namespace aeraui;
 int main(int argc, char** argv) {
-  assert(argc == 3);
-  const std::string scenario = argv[1], path = argv[2];
-  const std::string password = "host-test-password", changed = "changed-host-password";
-  aeraui::ScreenLockCredential lock(path);
-  assert(!lock.Enabled() && lock.ConsumeUnlock());
-  assert(!lock.Change("", "short"));
-  assert(lock.Change("", password));
-  assert(lock.Enabled() && !lock.ConsumeUnlock());
-  struct stat st{}; assert(stat(path.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
-  std::ifstream input(path); std::string record((std::istreambuf_iterator<char>(input)), {});
-  assert(record.find(password) == std::string::npos);
-  assert(!std::filesystem::exists(path + ".new"));
-  if (scenario == "persistence") {
-    aeraui::ScreenLockCredential reload(path);
-    assert(reload.Enabled() && !reload.ConsumeUnlock());
-    assert(reload.Verify(password) && reload.ConsumeUnlock() && !reload.ConsumeUnlock());
-    assert(reload.Verify(password)); reload.Lock(); assert(!reload.ConsumeUnlock());
-    assert(reload.Change(password, changed));
-    std::ifstream after(path); std::string updated((std::istreambuf_iterator<char>(after)), {});
-    assert(record != updated && updated.find(changed) == std::string::npos);
-    assert(reload.Verify(changed));
-    assert(reload.Disable(changed));
-    assert(!reload.Enabled() && !std::filesystem::exists(path));
-  } else if (scenario == "throttle") {
-    assert(!lock.Verify("wrong") && lock.RetrySeconds() > 0);
-    assert(!lock.Verify(password));
-    assert(!lock.Change("wrong", changed) && !lock.Disable("wrong"));
-    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
-    assert(lock.Verify(password));
-    assert(lock.RetrySeconds() == 0 && lock.ConsumeUnlock() && !lock.ConsumeUnlock());
-  } else if (scenario == "corrupt") {
-    std::ofstream(path) << "malformed credential\n";
-    aeraui::ScreenLockCredential reload(path);
-    assert(reload.Enabled() && !reload.ConsumeUnlock());
-    assert(!reload.Verify(password) && !reload.Change("", changed) && !reload.Disable(password));
-    // A transient unreadable/invalid record must be retried when storage
-    // becomes available, while never treating the failure as an unlocked UI.
-    std::ofstream(path) << record;
-    assert(reload.Verify(password));
-  } else if (scenario == "symlink") {
-    const std::string other = path + ".other";
-    std::filesystem::rename(path, other);
-    assert(symlink(other.c_str(), path.c_str()) == 0);
-    aeraui::ScreenLockCredential reload(path);
-    assert(reload.Enabled() && !reload.Verify(password) && !reload.ConsumeUnlock());
-  } else if (scenario == "storage_removed") {
-    assert(unlink(path.c_str()) == 0);
-    assert(lock.Enabled() && !lock.ConsumeUnlock());
-    assert(lock.Verify(password) && lock.ConsumeUnlock());
-    assert(lock.Disable(password));  // Authenticated removal remains possible.
-  } else if (scenario == "reject_inputs") {
-    assert(!lock.Change(password, std::string(257, 'x')));
-    assert(!lock.Change(password, std::string("12345678\0tail", 13)));
-    assert(lock.Verify(password));
-  } else {
-    assert(false);
+  assert(argc >= 2);
+  const std::string test = argv[1];
+  if (test == "state") {
+    AndroidScreenLock lock;
+    assert(!lock.Available() && !lock.SetEnabled(true));
+    assert(!lock.Prepare(0, {}) && !lock.Prepare(4, {}));
+    assert(lock.Prepare(3, [](const std::string& s) { return ScreenVerification{s == "1234", 0}; }));
+    assert(lock.CredentialType() == 3 && lock.SetEnabled(true));
+    assert(!lock.ConsumeUnlock());
+    assert(lock.Verify("1234") && lock.ConsumeUnlock() && !lock.ConsumeUnlock());
+    lock.Lock(); assert(!lock.ConsumeUnlock());
+    assert(!lock.Verify("bad"));
+    assert(lock.Verify("1234")); lock.Lock(); assert(!lock.ConsumeUnlock());
+    assert(!lock.Verify(std::string(257, '1')) && !lock.Verify(std::string("1234\0", 5)));
+    assert(lock.SetEnabled(false) && lock.ConsumeUnlock());
+  } else if (test == "throttle") {
+    AndroidScreenLock lock; int calls = 0;
+    assert(lock.Prepare(1, [&](const std::string&) { ++calls; return ScreenVerification{false, 17}; }));
+    assert(lock.SetEnabled(true) && !lock.Verify("wrong"));
+    assert(calls == 1 && lock.RetrySeconds() >= 17 && !lock.Verify("again") && calls == 1);
+    assert(!lock.ConsumeUnlock());
+  } else if (test == "race") {
+    AndroidScreenLock lock; std::mutex mutex; std::condition_variable condition;
+    bool entered = false, release = false;
+    lock.Prepare(1, [&](const std::string&) {
+      std::unique_lock<std::mutex> guard(mutex); entered = true; condition.notify_all();
+      condition.wait(guard, [&] { return release; }); return ScreenVerification{true, 0};
+    });
+    lock.SetEnabled(true);
+    bool result = true;
+    std::thread check([&] { result = lock.Verify("fake"); });
+    { std::unique_lock<std::mutex> guard(mutex); condition.wait(guard, [&] { return entered; }); }
+    assert(!lock.Verify("concurrent")); lock.Lock();
+    { std::lock_guard<std::mutex> guard(mutex); release = true; } condition.notify_all();
+    check.join(); assert(!result && !lock.ConsumeUnlock());
+  } else if (test == "metadata") {
+    assert(argc == 3);
+    AndroidScreenCredential m;
+    const bool okay = ReadAndroidScreenCredential(&m, argv[2]);
+    std::cout << okay << " " << m.type << " " << m.weaver_slot << "\n";
+    if (okay) {
+      std::vector<uint8_t> token;
+      assert(DeriveAndroidScreenToken(m, "1234", &token));
+      for (const auto b : token) printf("%02x", b);
+      puts("");
+    }
   }
 }

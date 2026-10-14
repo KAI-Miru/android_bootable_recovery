@@ -182,9 +182,13 @@ DecryptScene BuildDecryptScene(lv_obj_t *screen, int credential_type,
 std::string GetDecryptCredential(const DecryptScene &scene);
 void SetDecryptBusy(const DecryptScene &scene);
 void CompleteDecryptAttempt(const DecryptScene &scene, bool success);
+DecryptScene BuildScreenCredentialScene(lv_obj_t *screen, int credential_type, int pattern_grid_size,
+                                        ActionCallback callback, void *context);
+void ClearDecryptCredential(const DecryptScene &scene);
+void CompleteScreenCredentialAttempt(const DecryptScene &scene, bool success, int retry_seconds);
 void BuildPreparingScene(lv_obj_t *screen, bool decrypted);
 lv_obj_t *BuildLockScene(lv_obj_t *parent, ActionCallback callback,
-                         void *context);
+                         void *context, DecryptScene *bouncer = nullptr);
 void SetJobRequest(const JobRequest &request);
 JobRequest GetJobRequest();
 OperationScene BuildJobScene(lv_obj_t *screen, const JobRequest &request,

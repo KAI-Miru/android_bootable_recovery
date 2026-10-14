@@ -5,6 +5,7 @@
 
 #include "scene.hpp"
 #include "phone_keyboard.hpp"
+#include "lock_icon.hpp"
 #include "ui_components.hpp"
 
 #include <algorithm>
@@ -48,6 +49,7 @@ struct DecryptState {
   bool busy = false;
   bool submit_pending = false;
   bool secondary = false;
+  bool screen_lock = false;
 };
 
 void DeleteState(lv_event_t *event) {
@@ -59,7 +61,7 @@ void SubmitDecrypt(DecryptState *state) {
       state->submit_pending)
     return;
   state->submit_pending = true;
-  state->callback(Action::kDecryptSubmit, state->context);
+  state->callback(state->screen_lock ? Action::kScreenCredentialSubmit : Action::kDecryptSubmit, state->context);
 }
 
 void Dispatch(lv_event_t *event) {
@@ -88,7 +90,7 @@ void RefreshPattern(DecryptState *state) {
                               active ? kAccent : kMainPanel, 0);
     lv_obj_set_style_border_color(state->nodes[i],
                                   active ? kAccent : kLineBright, 0);
-    lv_obj_set_style_transform_scale(state->nodes[i], active ? 116 : 100, 0);
+    lv_obj_set_style_transform_scale(state->nodes[i], active ? 280 : 256, 0);
   }
   lv_line_set_points(state->pattern_line, state->points.data(),
                      static_cast<uint32_t>(state->sequence_length));
@@ -229,8 +231,10 @@ void RefreshGridButtons(DecryptState *state) {
 void LayoutPatternNodes(DecryptState *state) {
   const int count = state->grid_size;
   const int visible = count * count;
-  const int margin = count <= 3 ? 128 : 72;
-  const int span = 1012 - margin * 2 - 68;
+  lv_obj_update_layout(state->pattern_area);
+  const int width = lv_obj_get_width(state->pattern_area);
+  const int margin = width * (count <= 3 ? 128 : 72) / 1012;
+  const int span = width - margin * 2 - 68;
   for (int index = 0; index < kMaxPatternDots; ++index) {
     auto *node = state->nodes[index];
     if (node == nullptr) continue;
@@ -465,45 +469,8 @@ DecryptScene BuildDecryptScene(lv_obj_t *screen, int credential_type,
   (void)file_based;
   const bool pin = credential_type == 3;
 
-  // A small native lock illustration keeps startup lightweight.
-  lv_obj_t *emblem = lv_obj_create(screen);
-  Clear(emblem);
-  lv_obj_set_size(emblem, 208, 208);
+  auto* emblem = widgets::LockIcon(screen);
   lv_obj_align(emblem, LV_ALIGN_TOP_MID, 0, 310);
-  lv_obj_set_style_pad_all(emblem, 0, 0);
-  lv_obj_remove_flag(emblem, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_t *shackle = lv_obj_create(emblem);
-  Clear(shackle);
-  lv_obj_set_size(shackle, 74, 86);
-  lv_obj_set_pos(shackle, 67, 44);
-  lv_obj_set_style_radius(shackle, 38, 0);
-  lv_obj_set_style_border_width(shackle, 9, 0);
-  lv_obj_set_style_border_color(shackle, kAccent, 0);
-  lv_obj_t *lock_body = lv_obj_create(emblem);
-  Panel(lock_body, 16, kAccent);
-  lv_obj_set_size(lock_body, 104, 80);
-  lv_obj_set_pos(lock_body, 52, 94);
-  lv_obj_set_style_pad_all(lock_body, 0, 0);
-  // The lock itself must stay opaque even when the selected surface style is
-  // translucent; otherwise the lower arc of the shackle shows through as a
-  // misleading "0". Draw a solid, conventional keyhole on top instead.
-  lv_obj_set_style_bg_opa(lock_body, LV_OPA_COVER, 0);
-  lv_obj_set_style_blur_backdrop(lock_body, false, 0);
-  lv_obj_set_style_blur_radius(lock_body, 0, 0);
-  lv_obj_t *keyhole_dot = lv_obj_create(lock_body);
-  Clear(keyhole_dot);
-  lv_obj_set_size(keyhole_dot, 18, 18);
-  lv_obj_align(keyhole_dot, LV_ALIGN_CENTER, 0, -7);
-  lv_obj_set_style_radius(keyhole_dot, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(keyhole_dot, kCanvas, 0);
-  lv_obj_set_style_bg_opa(keyhole_dot, LV_OPA_COVER, 0);
-  lv_obj_t *keyhole_stem = lv_obj_create(lock_body);
-  Clear(keyhole_stem);
-  lv_obj_set_size(keyhole_stem, 8, 24);
-  lv_obj_align(keyhole_stem, LV_ALIGN_CENTER, 0, 10);
-  lv_obj_set_style_radius(keyhole_stem, 4, 0);
-  lv_obj_set_style_bg_color(keyhole_stem, kCanvas, 0);
-  lv_obj_set_style_bg_opa(keyhole_stem, LV_OPA_COVER, 0);
 
   const std::string target = user_name.empty()
       ? i18n::Format("Android user %d", user_id)
@@ -594,10 +561,11 @@ void SetDecryptBusy(const DecryptScene &scene) {
   auto *state = static_cast<DecryptState *>(scene.state);
   if (state == nullptr) return;
   state->busy = true;
-  i18n::BindLabel(state->status, state->secondary
+  i18n::BindLabel(state->status, state->screen_lock ? "Checking Android credential..." : state->secondary
                                        ? "Unlocking Android user..."
                                        : "Unlocking and preparing /data...");
   i18n::BindLabel(state->submit_label, "Unlocking...");
+  if (state->input) lv_obj_add_state(state->input, LV_STATE_DISABLED);
   lv_obj_add_state(state->submit, LV_STATE_DISABLED);
   if (state->keyboard != nullptr) lv_obj_add_state(state->keyboard, LV_STATE_DISABLED);
   for (auto *button : state->grid_buttons)
@@ -622,6 +590,7 @@ void CompleteDecryptAttempt(const DecryptScene &scene, bool success) {
                         : "That credential did not unlock data. Please try again.");
   lv_obj_set_style_text_color(state->status, kRed, 0);
   i18n::BindLabel(state->submit_label, "Try again");
+  if (state->input) lv_obj_remove_state(state->input, LV_STATE_DISABLED);
   lv_obj_remove_state(state->submit, LV_STATE_DISABLED);
   if (state->keyboard != nullptr) lv_obj_remove_state(state->keyboard, LV_STATE_DISABLED);
   for (auto *button : state->grid_buttons)
@@ -632,6 +601,93 @@ void CompleteDecryptAttempt(const DecryptScene &scene, bool success) {
   } else {
     ResetPattern(state);
   }
+}
+
+DecryptScene BuildScreenCredentialScene(lv_obj_t *screen, int type, int grid,
+                                        ActionCallback callback, void *context) {
+  auto* state = new DecryptState;
+  state->screen_lock = true; state->credential_type = type;
+  state->grid_size = std::clamp(grid, 3, 6);
+  state->callback = callback; state->context = context;
+  lv_obj_add_event_cb(screen, DeleteState, LV_EVENT_DELETE, state);
+  MainBackground(screen);
+  // Informational chrome only: the credential bouncer has no quick settings.
+  AttachStatusBar(screen, nullptr, nullptr, StatusBarAction::kNone, true);
+  const int width = lv_obj_get_width(screen), height = lv_obj_get_height(screen);
+  const bool landscape = width > height;
+  auto* icon = widgets::LockIcon(screen, 160);
+  lv_obj_set_pos(icon, (landscape ? width / 4 : width / 2) - 80,
+                 landscape ? height / 2 - 330 : 190);
+  auto* title = Label(screen, "Unlock AERA", &lv_font_montserrat_48, kText);
+  lv_obj_set_width(title, landscape ? width / 2 - 160 : width - 160);
+  lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_pos(title, 80, landscape ? height / 2 - 110 : 390);
+  auto* subtitle = Label(screen, type == 3 ? "Use your phone's PIN to continue." :
+      type == 2 ? "Draw your phone's unlock pattern." : "Use your phone's password to continue.",
+      &lv_font_montserrat_32, kMuted);
+  lv_obj_set_width(subtitle, landscape ? width / 2 - 160 : width - 160);
+  lv_obj_set_style_text_align(subtitle, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_pos(subtitle, 80, landscape ? height / 2 : 480);
+  auto* panel = lv_obj_create(screen);
+  Clear(panel);
+  lv_obj_set_style_pad_all(panel, 0, 0);
+  lv_obj_set_pos(panel, landscape ? width - 1304 : (width - 1184) / 2, landscape ? 140 : 680);
+  lv_obj_set_size(panel, 1184, landscape ? height - 200 : height - 740);
+  state->status = Label(panel, "", &lv_font_montserrat_24, kMuted);
+  lv_obj_set_width(state->status, 1012);
+  lv_obj_set_style_text_align(state->status, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_pos(state->status, 86, landscape ? 150 : 300);
+  if (type == 2) {
+    MakePattern(state, panel);
+    auto* selector = lv_obj_get_parent(state->grid_buttons[0]);
+    lv_obj_set_pos(selector, 86, landscape ? 60 : 180);
+    const int side = landscape ? 700 : 1012;
+    lv_obj_set_pos(state->pattern_area, (1184 - side) / 2, landscape ? 240 : 420);
+    lv_obj_set_size(state->pattern_area, side, side);
+    lv_obj_set_size(state->pattern_line, side, side);
+    LayoutPatternNodes(state);
+  } else {
+    MakeKeyboard(state, panel, type == 3);
+    lv_obj_set_pos(state->input, 86, 0);
+    if (landscape) {
+      lv_obj_set_size(state->input, 1012, 140);
+      lv_obj_set_pos(state->keyboard, type == 3 ? 86 : 36, 260);
+      lv_obj_set_size(state->keyboard, type == 3 ? 1012 : 1112, 660);
+      if (type == 3) {
+        for (int i = 0; i < 12; ++i) {
+          auto* key = lv_obj_get_child(state->keyboard, i);
+          lv_obj_set_pos(key, 80 + (i % 3) * 320, (i / 3) * 164);
+          lv_obj_set_size(key, 148, 148);
+        }
+      }
+    }
+  }
+  state->submit = MakeButton(panel, "Unlock", kAccent, kCanvas);
+  state->submit_label = lv_obj_get_child(state->submit, 0);
+  lv_obj_set_pos(state->submit, 86, landscape ? height - 400 : type == 3 ? 1510 : 1818);
+  lv_obj_set_size(state->submit, 1012, landscape ? 116 : 142);
+  Bind(state->submit, Action::kDecryptSubmit, state);
+  // No skip, slider, password dialog, or storage-decryption action in this scene.
+  if (state->input) lv_obj_send_event(state->input, LV_EVENT_FOCUSED, nullptr);
+  return {state->status, state->input, state->submit, state};
+}
+void ClearDecryptCredential(const DecryptScene& scene) {
+  auto* state = static_cast<DecryptState*>(scene.state);
+  if (!state) return;
+  if (state->input) lv_textarea_set_text(state->input, "");
+  state->tracking = false; state->sequence_length = 0;
+  state->sequence.fill(0); state->selected.fill(false);
+  if (state->pattern_area) RefreshPattern(state);
+}
+void CompleteScreenCredentialAttempt(const DecryptScene& scene, bool success, int retry_seconds) {
+  auto* state = static_cast<DecryptState*>(scene.state);
+  if (!state) return;
+  if (success) return;
+  CompleteDecryptAttempt(scene, false);
+  if (retry_seconds > 0)
+    lv_label_set_text(state->status, i18n::Format("Try again in %d seconds.", retry_seconds).c_str());
+  else i18n::BindLabel(state->status, "Could not verify your Android credential. Please try again.");
+  i18n::BindLabel(state->submit_label, "Unlock");
 }
 
 void BuildPreparingScene(lv_obj_t *screen, bool decrypted) {

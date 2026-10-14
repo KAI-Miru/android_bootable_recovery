@@ -89,17 +89,24 @@ than presented as success. Backup checksum generation and restore verification
 remain enabled. This is not complete OrangeFox settings parity: XML themes and OTA preferences
 still need dedicated native integration.
 
-Preferences places Screen timeout and Screen lock password below Brightness.
-The timeout defaults to one minute and can be set to Never. Input resets the
-timer; inactivity dims then blanks the panel. Power wakes into the lock scene,
-while background recovery workers continue running.
+Preferences places Screen timeout below Brightness. The default is one minute;
+Never disables the timer. Touch or keyboard input resets it, and Power wakes
+the display. The selected timeout is saved in shared preferences.
 
-The optional lock uses a separate AERA password. Its salted PBKDF2-SHA256
-verifier is stored privately in `/data/system/aera/screen-lock.conf`; it is not
-an Android credential and is never sent through DataManager or the host API.
-Changing or disabling it requires the current password, failed checks are
-throttled, and resetting preferences keeps the password. This protects access
-to the recovery UI, not storage encryption or an existing root ADB connection.
+Use Android screen lock is offered only after the owner's FBE storage has
+successfully decrypted and its active synthetic-password metadata and native
+Gatekeeper/Weaver verifier are available. Wake opens the PIN, pattern or password
+bouncer directly. It reuses the decryption lock icon, also shown in Preferences.
+Quick settings is disabled on the bouncer and remains available on the ordinary
+slider lock screen. Verification does not rerun decryption, install keys, mount
+data, or enroll credentials. Hardware retry delays and a local throttle are
+honored. Service failures keep the screen locked; verification is asynchronous.
+This controls the recovery interface, not root ADB or already-decrypted storage.
+Biometrics and legacy FDE are not offered without a verification-only backend.
+
+The separate AERA password and its setup dialogs have been removed. Existing
+screen-lock.conf files are ignored and left untouched. The Android-lock option
+starts disabled on upgrade and is only loaded after successful storage unlock.
 
 Host-only regression checks (mock controllers, no destructive backend linked):
 

@@ -196,7 +196,10 @@ void RecoveryTerminalWrite(const std::string &) {}
 void RecoveryTerminalSendKey(TerminalKey) {}
 void RecoveryTerminalClear() {}
 bool RecoveryTerminalRunning() { return true; }
-void AttachStatusBar(lv_obj_t *screen, void (*)(Action,void*),void*,StatusBarAction,bool) {
+bool status_bar_interactive = false, status_bar_closed = false;
+void CloseStatusBarShades() { status_bar_closed = true; }
+void AttachStatusBar(lv_obj_t *screen, void (*callback)(Action,void*),void*,StatusBarAction,bool) {
+  status_bar_interactive = callback != nullptr;
   auto *label=design::Label(screen,"23:30                         100%",&lv_font_montserrat_32,design::kText);
   lv_obj_set_pos(label,54,65);
 }
@@ -258,19 +261,18 @@ bool RecoverySetScreenTimeout(int seconds) {
   screen_timeout = seconds;
   return true;
 }
-bool screen_lock_enabled = false, screen_unlock_authorized = false;
-std::string screen_lock_password;
+bool screen_lock_enabled = false, screen_unlock_authorized = false, screen_lock_available = true;
+int screen_credential_type = 3;
+bool RecoveryScreenLockAvailable() { return screen_lock_available; }
+int RecoveryScreenLockCredentialType() { return screen_credential_type; }
+int RecoveryPatternGridSize() { return 3; }
 bool RecoveryScreenLockEnabled() { return screen_lock_enabled; }
-bool RecoveryChangeScreenLockPassword(const std::string& current, const std::string& replacement) {
-  if (screen_lock_enabled && current != screen_lock_password) return false;
-  screen_lock_password = replacement; screen_lock_enabled = true; return true;
+bool RecoverySetScreenLockEnabled(bool enabled) {
+  if (!screen_lock_available) return false;
+  screen_lock_enabled = enabled; return true;
 }
-bool RecoveryDisableScreenLock(const std::string& current) {
-  if (current != screen_lock_password) return false;
-  screen_lock_enabled = false; return true;
-}
-bool RecoveryVerifyScreenLock(const std::string& password) {
-  screen_unlock_authorized = password == screen_lock_password; return screen_unlock_authorized;
+bool RecoveryVerifyScreenLock(const std::string& credential) {
+  screen_unlock_authorized = credential == "1234"; return screen_unlock_authorized;
 }
 int RecoveryScreenLockRetrySeconds() { return 0; }
 void RecoveryLockScreen() { screen_unlock_authorized = false; }
@@ -624,58 +626,68 @@ int main(int argc,char **argv) {
     return 0;
   }
   if (!strcmp(argv[1], "--screen-lock")) {
+    screen_lock_available = false;
+    auto* locked_prefs = lv_obj_create(nullptr);
+    BuildToolScene(locked_prefs, Action::kPreferences, RecordAction, nullptr);
+    assert(!FindPreferenceEntry(locked_prefs, "Use Android screen lock"));
+    lv_obj_delete(locked_prefs);
+    screen_lock_available = true;
     for (const char* language : {"en", "zh_CN", "zh_TW"})
-      for (const bool landscape : {false, true}) {
-        assert(i18n::SetLanguage(language));
-        lv_display_set_resolution(display, landscape ? 3168 : 1440, landscape ? 1440 : 3168);
-        screen_lock_enabled = false;
-        auto* prefs = lv_obj_create(nullptr);
-        BuildToolScene(prefs, Action::kPreferences, RecordAction, nullptr);
-        lv_screen_load(prefs); Tick(2);
-        auto* entry = FindPreferenceEntry(prefs, i18n::Translate("Screen lock password")); assert(entry);
-        lv_obj_send_event(entry, LV_EVENT_CLICKED, nullptr); Tick(2);
-        auto* input = FindType(prefs, &lv_textarea_class); assert(input);
-        assert(lv_textarea_get_password_mode(input));
-        lv_textarea_set_text(input, "short");
-        lv_obj_send_event(Find(prefs, i18n::Translate("Continue")), LV_EVENT_CLICKED, nullptr);
-        assert(!screen_lock_enabled && FindLabel(prefs, i18n::Translate("Use at least 8 characters.")));
-        lv_textarea_set_text(input, "host-ui-password");
-        lv_obj_send_event(Find(prefs, i18n::Translate("Continue")), LV_EVENT_CLICKED, nullptr); Tick(2);
-        input = FindType(prefs, &lv_textarea_class); assert(input);
-        lv_textarea_set_text(input, "not-the-same");
-        lv_obj_send_event(Find(prefs, i18n::Translate("Continue")), LV_EVENT_CLICKED, nullptr);
-        assert(!screen_lock_enabled && FindLabel(prefs, i18n::Translate("Passwords do not match.")));
-        lv_textarea_set_text(input, "host-ui-password");
-        lv_obj_send_event(Find(prefs, i18n::Translate("Continue")), LV_EVENT_CLICKED, nullptr); Tick(2);
-        assert(screen_lock_enabled);
-        lv_screen_load(screen); lv_obj_delete(prefs);
-        auto* lock = BuildLockScene(lv_layer_top(), RecordAction, nullptr); Tick(2);
-        assert(!FindLabel(lock, i18n::Translate("Slide to unlock")));
-        auto* unlock = Find(lock, i18n::Translate("Unlock with password")); assert(unlock);
-        lv_obj_send_event(unlock, LV_EVENT_CLICKED, nullptr); Tick(2);
-        input = FindType(lock, &lv_textarea_class); assert(input);
-        assert(lv_textarea_get_password_mode(input));
-        assert(text_edit::FocusedInput() == input && phone_keyboard::VisibleKeyboard());
-        hardware_keys::State physical;
-        assert(physical.Update(KEY_A, 1));
-        assert(hardware_keyboard::Handle(KEY_A, 1, physical));
-        assert(!strcmp(lv_textarea_get_text(input), "a"));
-        last_action = Action::kNone;
-        lv_textarea_set_text(input, "wrong");
-        lv_obj_send_event(Find(lock, i18n::Translate("Continue")), LV_EVENT_CLICKED, nullptr);
-        assert(last_action == Action::kNone && !RecoveryConsumeScreenUnlock());
-        const std::string picture = "/tmp/aera-screen-password-" + std::string(language) +
-            (landscape ? "-landscape.png" : "-portrait.png");
-        save(picture.c_str());
-        lv_textarea_set_text(input, "host-ui-password");
-        lv_obj_send_event(Find(lock, i18n::Translate("Continue")), LV_EVENT_CLICKED, nullptr);
-        assert(last_action == Action::kUnlock && RecoveryConsumeScreenUnlock());
-        assert(!RecoveryConsumeScreenUnlock());
-        Tick(2); lv_obj_delete(lock);
-      }
-    lv_display_delete(display); lv_deinit();
-    std::filesystem::remove_all(backup_root);
-    puts("Password setup, confirmation, masked unlock, rejection and English/Chinese layouts passed.");
+      for (const bool landscape : {false, true})
+        for (const int type : {1, 2, 3}) {
+          assert(i18n::SetLanguage(language));
+          lv_display_set_resolution(display, landscape ? 3168 : 1440, landscape ? 1440 : 3168);
+          screen_lock_enabled = true; screen_credential_type = type;
+          RecoveryLockScreen();
+          DecryptScene bouncer;
+          auto* lock = BuildLockScene(lv_layer_top(), RecordAction, nullptr, &bouncer); Tick(2);
+          assert(!FindLabel(lock, i18n::Translate("Slide to unlock")));
+          assert(!FindLabel(lock, "Unlock with password"));
+          assert(!FindLabel(lock, i18n::Translate("Skip for now")));
+          assert(FindLabel(lock, i18n::Translate("Unlock AERA")));
+          assert(bouncer.submit && bouncer.state);
+          assert(!status_bar_interactive && status_bar_closed);
+          lv_area_t bounds{}; lv_obj_get_coords(bouncer.submit, &bounds);
+          if (bounds.x1 < 0 || bounds.y1 < 0 || bounds.x2 >= lv_display_get_horizontal_resolution(display) || bounds.y2 >= lv_display_get_vertical_resolution(display))
+            fprintf(stderr, "Bouncer %s landscape=%d type=%d bounds=%d,%d,%d,%d\n", language, landscape, type, bounds.x1, bounds.y1, bounds.x2, bounds.y2);
+          assert(bounds.x1 >= 0 && bounds.y1 >= 0 && bounds.x2 < lv_display_get_horizontal_resolution(display) &&
+                 bounds.y2 < lv_display_get_vertical_resolution(display));
+          if (type != 2) {
+            assert(bouncer.input && lv_textarea_get_password_mode(bouncer.input));
+            lv_textarea_set_text(bouncer.input, type == 3 ? "1234" : "fake-password");
+            assert(GetDecryptCredential(bouncer) == (type == 3 ? "1234" : "fake-password"));
+          } else {
+            assert(!bouncer.input);
+            auto* line = FindType(lock, &lv_line_class); assert(line);
+            auto* area = lv_obj_get_parent(line);
+            for (int i = 1; i <= 9; ++i) {
+              auto* dot = lv_obj_get_child(area, i); assert(dot);
+              assert(!lv_obj_has_flag(dot, LV_OBJ_FLAG_HIDDEN));
+              assert(lv_obj_get_x(dot) > 0 && lv_obj_get_y(dot) > 0);
+              assert(lv_obj_get_x(dot) + lv_obj_get_width(dot) < lv_obj_get_width(area));
+              assert(lv_obj_get_y(dot) + lv_obj_get_height(dot) < lv_obj_get_height(area));
+            }
+          }
+          last_action = Action::kNone;
+          lv_obj_send_event(bouncer.submit, LV_EVENT_CLICKED, nullptr);
+          assert(last_action == Action::kScreenCredentialSubmit);
+          assert(!RecoveryConsumeScreenUnlock()); // A UI submit is never authorization.
+          ClearDecryptCredential(bouncer); assert(GetDecryptCredential(bouncer).empty());
+          SetDecryptBusy(bouncer); assert(lv_obj_has_state(bouncer.submit, LV_STATE_DISABLED));
+          CompleteScreenCredentialAttempt(bouncer, false, 7);
+          assert(FindLabel(lock, i18n::Format("Try again in %d seconds.", 7).c_str()));
+          const std::string picture = "/tmp/aera-android-bouncer-" + std::string(language) + "-" +
+              std::to_string(type) + (landscape ? "-landscape.png" : "-portrait.png");
+          save(picture.c_str());
+          assert(RecoveryVerifyScreenLock("1234") && RecoveryConsumeScreenUnlock());
+          assert(!RecoveryConsumeScreenUnlock());
+          lv_obj_delete(lock); Tick(2);
+        }
+    i18n::SetLanguage("en");
+    screen_lock_enabled = false;
+    auto* slide = BuildLockScene(lv_layer_top(), RecordAction, nullptr);
+    assert(FindLabel(slide, "Slide to unlock") && status_bar_interactive); lv_obj_delete(slide);
+    puts("Direct PIN/pattern/password bouncers, unsupported-device gating and English/Chinese layouts passed.");
     return 0;
   }
   if (!strcmp(argv[1], "--status-bar-settings")) {
@@ -1388,7 +1400,7 @@ int main(int argc,char **argv) {
     const auto kept_accent = accent_color;
     const int before_reset = autosave_count;
     lv_obj_send_event(Find(prefs, "Reset preferences"), LV_EVENT_CLICKED, nullptr);
-    assert(Find(prefs, "Restore default preferences? Theme, language, Wi-Fi, plugin settings and the screen lock password are kept."));
+    assert(Find(prefs, "Restore default preferences? Theme, language, Wi-Fi, plugin settings and Android screen lock are kept."));
     assert(autosave_count == before_reset);
     ConfirmSettingsModal(prefs); Tick(2);
     assert(autosave_count == before_reset + 1);
@@ -1528,7 +1540,7 @@ int main(int argc,char **argv) {
             BuildToolScene(prefs, Action::kPreferences, RecordAction, nullptr);
             lv_screen_load(prefs); Tick(1);
             std::vector<const char *> titles{
-                "Language", "Brightness", "Screen timeout", "Screen lock password", "24-hour clock", "Time zone", "Gesture navigation"};
+                "Language", "Brightness", "Screen timeout", "Use Android screen lock", "24-hour clock", "Time zone", "Gesture navigation"};
             if (haptics) titles.push_back("Haptics");
             titles.push_back("Show hidden files");
             titles.push_back("Verify ZIP signatures");

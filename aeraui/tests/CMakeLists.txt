@@ -86,7 +86,7 @@ add_test(NAME ui_confirmation_navigation_preferences
   COMMAND ui_check "${LVGL_DIR}/examples/libs/libpng/png_demo.png")
 add_test(NAME file_timestamp_layout COMMAND ui_check --file-dates)
 add_test(NAME settings_autosave_and_reset COMMAND ui_check --settings)
-add_test(NAME screen_password_ui COMMAND ui_check --screen-lock)
+add_test(NAME android_screen_bouncer_ui COMMAND ui_check --screen-lock)
 add_test(NAME themed_home_artwork COMMAND ui_check --art)
 add_test(NAME themed_home_layout COMMAND ui_check --home-art)
 add_test(NAME pc_connection_settings_layout COMMAND ui_check --pc-settings)

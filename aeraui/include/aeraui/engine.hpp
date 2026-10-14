@@ -75,6 +75,7 @@ enum class Action {
     kCancelPcBackup,
     kStatusBar,
     kTemperatures,
+    kScreenCredentialSubmit,
 };
 
 enum class DecryptionCompletion {

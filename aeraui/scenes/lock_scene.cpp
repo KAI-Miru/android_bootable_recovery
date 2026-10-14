@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "scene.hpp"
-#include "screen_password.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -172,7 +171,21 @@ void DeleteState(lv_event_t *event) {
 }  // namespace
 
 lv_obj_t *BuildLockScene(lv_obj_t *parent, ActionCallback callback,
-                         void *context) {
+                         void *context, DecryptScene *bouncer) {
+  if (RecoveryScreenLockEnabled()) {
+    CloseStatusBarShades();
+    auto* root = lv_obj_create(parent);
+    MainBackground(root);
+    lv_obj_set_size(root, lv_obj_get_width(parent), lv_obj_get_height(parent));
+    lv_obj_set_pos(root, 0, 0);
+    lv_obj_update_layout(root);
+    const auto scene = BuildScreenCredentialScene(root, RecoveryScreenLockCredentialType(),
+        RecoveryPatternGridSize(), callback, context);
+    if (bouncer) *bouncer = scene;
+    lv_obj_move_foreground(root);
+    return root;
+  }
+  if (bouncer) *bouncer = {};
   auto *state = new LockState;
   state->callback = callback;
   state->context = context;
@@ -237,23 +250,6 @@ lv_obj_t *BuildLockScene(lv_obj_t *parent, ActionCallback callback,
   lv_obj_align_to(state->date, state->clock, LV_ALIGN_OUT_BOTTOM_MID,
                   0, state->landscape ? 10 : 18);
 
-  if (RecoveryScreenLockEnabled()) {
-    auto* unlock = widgets::Button(content, "Unlock with password", [root, state] {
-      widgets::ScreenPasswordPrompt(root, "Unlock AERA", "Enter your recovery password.",
-          [state](const std::string& password, std::string& error) {
-        if (!RecoveryVerifyScreenLock(password)) {
-          error = RecoveryScreenLockRetrySeconds() > 0
-              ? "Incorrect password or try again later." : "Could not verify the password.";
-          return false;
-        }
-        if (state->callback) state->callback(Action::kUnlock, state->context);
-        return true;
-      });
-    }, true);
-    lv_obj_set_size(unlock, kSliderWidth, kSliderHeight);
-    lv_obj_align(unlock, LV_ALIGN_BOTTOM_MID, state->landscape ? 700 : 0,
-                 state->landscape ? -180 : -245);
-  } else {
   auto *slider = lv_obj_create(content);
   state->slider = slider;
   Clear(slider);
@@ -306,7 +302,6 @@ lv_obj_t *BuildLockScene(lv_obj_t *parent, ActionCallback callback,
                         Color(0x071116));
   lv_obj_center(chevron);
   lv_obj_remove_flag(chevron, LV_OBJ_FLAG_CLICKABLE);
-  }
 
   RefreshClock(state);
   state->timer = lv_timer_create([](lv_timer_t *timer) {

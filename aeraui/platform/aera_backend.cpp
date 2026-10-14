@@ -54,6 +54,7 @@
 #include "aeraui/platform/image_targets.hpp"
 #include "temperature_reader.hpp"
 #include "screen_lock.hpp"
+#include "android_screen_credential.hpp"
 #include <twinstall.h>
 #include <twinstall/adb_install.h>
 
@@ -1698,24 +1699,41 @@ bool RecoveryAnswerInstallerPrompt(bool accepted) {
   return true;
 }
 namespace {
-ScreenLockCredential& ScreenPassword() {
-  static ScreenLockCredential credential("/data/system/aera/screen-lock.conf");
-  return credential;
+AndroidScreenLock& ScreenLock() {
+  static AndroidScreenLock lock;
+  return lock;
+}
+void PrepareAndroidScreenLock() {
+  if (ScreenLock().Available() || DataManager::GetIntValue(TW_IS_FBE) == 0 ||
+      DataManager::GetIntValue(TW_IS_DECRYPTED) == 0 ||
+      !android::base::GetBoolProperty("twrp.user.0.decrypt", false) ||
+      !PartitionManager.Is_Mounted_By_Path("/data")) return;
+  AndroidScreenCredential metadata;
+  if (!ReadAndroidScreenCredential(&metadata) || !AndroidScreenVerifierAvailable(metadata)) return;
+  ScreenLock().Prepare(metadata.type, [metadata](const std::string& credential) {
+    return VerifyAndroidScreenCredential(metadata, credential);
+  });
+  LoadAeraPreferencesIfAvailable();
+  ScreenLock().SetEnabled(DataManager::GetIntValue("aera_android_screen_lock") == 1);
 }
 }
-
-bool RecoveryScreenLockEnabled() { return ScreenPassword().Enabled(); }
-bool RecoveryChangeScreenLockPassword(const std::string& current, const std::string& replacement) {
-  // Never create a credential store in the ramdisk underneath an unmounted /data.
-  return PartitionManager.Is_Mounted_By_Path("/data") && ScreenPassword().Change(current, replacement);
+bool RecoveryScreenLockAvailable() { PrepareAndroidScreenLock(); return ScreenLock().Available(); }
+int RecoveryScreenLockCredentialType() { PrepareAndroidScreenLock(); return ScreenLock().CredentialType(); }
+bool RecoveryScreenLockEnabled() { PrepareAndroidScreenLock(); return ScreenLock().Enabled(); }
+bool RecoverySetScreenLockEnabled(bool enabled) {
+  PrepareAndroidScreenLock();
+  if (!ScreenLock().Available()) return false;
+  const bool previous = ScreenLock().Enabled();
+  DataManager::SetValue("aera_android_screen_lock", enabled ? 1 : 0);
+  if (!SaveAeraPreferences()) {
+    DataManager::SetValue("aera_android_screen_lock", previous ? 1 : 0); return false;
+  }
+  return ScreenLock().SetEnabled(enabled);
 }
-bool RecoveryDisableScreenLock(const std::string& current) {
-  return PartitionManager.Is_Mounted_By_Path("/data") && ScreenPassword().Disable(current);
-}
-bool RecoveryVerifyScreenLock(const std::string& password) { return ScreenPassword().Verify(password); }
-int RecoveryScreenLockRetrySeconds() { return ScreenPassword().RetrySeconds(); }
-void RecoveryLockScreen() { ScreenPassword().Lock(); }
-bool RecoveryConsumeScreenUnlock() { return ScreenPassword().ConsumeUnlock(); }
+bool RecoveryVerifyScreenLock(const std::string& credential) { return ScreenLock().Verify(credential); }
+int RecoveryScreenLockRetrySeconds() { return ScreenLock().RetrySeconds(); }
+void RecoveryLockScreen() { ScreenLock().Lock(); }
+bool RecoveryConsumeScreenUnlock() { return ScreenLock().ConsumeUnlock(); }
 
 bool RecoveryScreenTimeoutAvailable() {
 #ifdef TW_NO_SCREEN_TIMEOUT
@@ -2838,7 +2856,9 @@ void LoadAeraPreferencesIfAvailable() {
     bool early_key = false;
     SetEarlyUiValue(&full_ui, key, value, &early_key);
     if (early_key) continue;
-    if (key == "hidden")
+    if (key == "android_screen_lock" && (value == "0" || value == "1"))
+      DataManager::SetValue("aera_android_screen_lock", value);
+    else if (key == "hidden")
       DataManager::SetValue("tw_hidden_files", value);
     else if (key == "compression") DataManager::SetValue(TW_USE_COMPRESSION_VAR, value);
     else if (key == "sha256") DataManager::SetValue(TW_USE_SHA2, value);
@@ -2889,6 +2909,7 @@ bool SaveAeraPreferences(bool require_early) {
          << "timezone=" << DataManager::GetStrValue(TW_TIME_ZONE_VAR) << '\n'
          << "brightness=" << DataManager::GetIntValue("tw_brightness_pct") << '\n'
          << "screen_timeout=" << RecoveryScreenTimeout() << '\n'
+         << "android_screen_lock=" << DataManager::GetIntValue("aera_android_screen_lock") << '\n'
          << "accent=" << DataManager::GetStrValue("aera_theme_accent") << '\n'
          << "theme="
          << (RecoveryAppearanceMode() == AppearanceMode::kAmoled ? "amoled"

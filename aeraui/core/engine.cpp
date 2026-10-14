@@ -394,6 +394,7 @@ public:
       operation_thread_.join();
     if (decrypt_thread_.joinable())
       decrypt_thread_.join();
+    if (screen_verify_thread_.joinable()) screen_verify_thread_.join();
     if (wifi_thread_.joinable())
       wifi_thread_.join();
     if (nas_thread_.joinable())
@@ -453,6 +454,9 @@ public:
     boot_animation_complete_ = false;
     operation_running_ = false;
     decrypt_running_ = false;
+    screen_verify_running_ = false;
+    screen_verify_complete_.store(false);
+    screen_credential_scene_ = {};
     wifi_running_ = false;
     wifi_scene_report_ = false;
     wifi_report_state_ = nullptr;
@@ -543,6 +547,15 @@ public:
     if (operation_running_ && operation_visible_ && MonotonicMilliseconds() - last_operation_update_ >= 500) {
       last_operation_update_ = MonotonicMilliseconds();
       RefreshOperationScene(operation_scene_);
+    }
+    if (screen_verify_complete_.exchange(false, std::memory_order_acq_rel)) {
+      if (screen_verify_thread_.joinable()) screen_verify_thread_.join();
+      screen_verify_running_ = false;
+      if (lock_overlay_) {
+        const bool success = screen_verify_result_.load(std::memory_order_acquire) && !suspended_;
+        CompleteScreenCredentialAttempt(screen_credential_scene_, success, RecoveryScreenLockRetrySeconds());
+        if (success) HandleSceneAction(Action::kUnlock, this);
+      }
     }
     if (decrypt_complete_.exchange(false, std::memory_order_acq_rel)) {
       if (decrypt_thread_.joinable()) decrypt_thread_.join();
@@ -1083,6 +1096,8 @@ public:
 
   void SetSuspended(bool suspended) {
     if (suspended) {
+      RecoveryLockScreen();
+      if (lock_overlay_ && screen_credential_scene_.state) ClearDecryptCredential(screen_credential_scene_);
       ResetKeyboard();
       auto* input = text_edit::FocusedInput();
       if (input && lv_textarea_get_password_mode(input)) lv_textarea_set_text(input, "");
@@ -1107,7 +1122,7 @@ public:
     CancelRecentsSwipe();
     pointer_.pressed = false;
     if (pointer_device_ != nullptr) lv_indev_reset(pointer_device_, nullptr);
-    lock_overlay_ = BuildLockScene(lv_layer_top(), HandleSceneAction, this);
+    lock_overlay_ = BuildLockScene(lv_layer_top(), HandleSceneAction, this, &screen_credential_scene_);
   }
 
   void ShowPowerMenu() {
@@ -2383,11 +2398,29 @@ private:
       return;
     }
 
+    if (action == Action::kScreenCredentialSubmit) {
+      if (!self->lock_overlay_ || !RecoveryScreenLockEnabled() || self->screen_verify_running_ || self->suspended_) return;
+      auto credential = GetDecryptCredential(self->screen_credential_scene_);
+      ClearDecryptCredential(self->screen_credential_scene_);
+      SetDecryptBusy(self->screen_credential_scene_);
+      self->screen_verify_running_ = true;
+      self->screen_verify_thread_ = std::thread([self, credential = std::move(credential)]() mutable {
+        operation_affinity::RestoreForWorker();
+        const bool result = RecoveryVerifyScreenLock(credential);
+        volatile char* bytes = credential.empty() ? nullptr : &credential[0];
+        for (size_t i = 0; i < credential.size(); ++i) bytes[i] = 0;
+        credential.clear();
+        self->screen_verify_result_.store(result, std::memory_order_release);
+        self->screen_verify_complete_.store(true, std::memory_order_release);
+      });
+      return;
+    }
     if (action == Action::kUnlock) {
       if (!RecoveryConsumeScreenUnlock()) return;
       if (self->lock_overlay_ != nullptr) {
         lv_obj_t *lock = self->lock_overlay_;
         self->lock_overlay_ = nullptr;
+        self->screen_credential_scene_ = {};
         lv_obj_fade_out(lock, 220, 0);
         lv_obj_delete_delayed(lock, 230);
       }
@@ -3776,6 +3809,10 @@ private:
   PointerEvent pointer_{};
   OperationScene operation_scene_{};
   DecryptScene decrypt_scene_{};
+  DecryptScene screen_credential_scene_{};
+  std::thread screen_verify_thread_;
+  std::atomic<bool> screen_verify_complete_{false}, screen_verify_result_{false};
+  bool screen_verify_running_ = false;
   WifiScene wifi_scene_{};
   NasScene nas_scene_{};
   PluginScene plugin_scene_{};

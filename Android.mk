@@ -64,7 +64,9 @@ LOCAL_SRC_FILES := \
     aeraui/features/plugin_api/operations.cpp \
     tarWrite.c \
     twrpAdbBuFifo.cpp \
-    twrpRepacker.cpp
+    twrpRepacker.cpp \
+    aeraui/platform/screen_lock.cpp \
+    aeraui/platform/android_screen_credential_stub.cpp
 
 LOCAL_STATIC_LIBRARIES += libjsoncpp
 LOCAL_C_INCLUDES += \
@@ -81,7 +83,6 @@ LOCAL_SRC_FILES += \
     aera_supplicant_link.cpp \
     aera_adbd.cpp \
     aera_secrets/aera_secrets.cpp \
-    aeraui/platform/screen_lock.cpp \
     nas/NasManager.cpp
 LOCAL_C_INCLUDES += \
     $(LOCAL_PATH) \
@@ -389,6 +390,7 @@ ifneq ($(TW_POST_DECRYPT_MODULES),)
 endif
 
 ifeq ($(TW_INCLUDE_CRYPTO), true)
+    LOCAL_SRC_FILES += aeraui/platform/android_screen_metadata.cpp aeraui/platform/android_screen_verifier.cpp
     LOCAL_CFLAGS += -DTW_INCLUDE_CRYPTO -DUSE_FSCRYPT -Wno-macro-redefined
     LOCAL_SHARED_LIBRARIES += libgpt_twrp
     LOCAL_C_INCLUDES += external/boringssl/src/include bootable/recovery/crypto

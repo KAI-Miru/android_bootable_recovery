@@ -1,37 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
-#include <array>
 #include <chrono>
+#include <functional>
 #include <mutex>
 #include <string>
-#include <utility>
-
 namespace aeraui {
-
-// UI access control only. This does not encrypt storage or restrict root ADB.
-class ScreenLockCredential {
+struct ScreenVerification { bool success = false; int retry_seconds = 0; };
+// Session UI authorization only. Android owns credential verification.
+// No password, independent verifier or disk key is stored here.
+class AndroidScreenLock {
  public:
-  explicit ScreenLockCredential(std::string path) : path_(std::move(path)) {}
+  using Verifier = std::function<ScreenVerification(const std::string&)>;
+  bool Prepare(int credential_type, Verifier verifier);
+  bool Available();
+  int CredentialType();
+  bool SetEnabled(bool enabled);
   bool Enabled();
-  bool Change(const std::string& current, const std::string& replacement);
-  bool Disable(const std::string& current);
-  bool Verify(const std::string& password);
+  bool Verify(const std::string& credential);
   void Lock();
   bool ConsumeUnlock();
   int RetrySeconds();
-
  private:
-  bool Load();
-  bool VerifyLocked(const std::string& password);
-  bool Write(const std::array<unsigned char, 16>& salt,
-             const std::array<unsigned char, 32>& digest);
   std::mutex mutex_;
-  std::string path_;
-  bool enabled_ = false, valid_ = false, authorized_ = false;
-  std::array<unsigned char, 16> salt_{};
-  std::array<unsigned char, 32> digest_{};
-  unsigned failures_ = 0;
+  Verifier verifier_;
+  int type_ = 0;
+  bool enabled_ = false, authorized_ = false, verifying_ = false;
+  unsigned generation_ = 0, failures_ = 0;
   std::chrono::steady_clock::time_point retry_after_{};
 };
-
 }  // namespace aeraui
