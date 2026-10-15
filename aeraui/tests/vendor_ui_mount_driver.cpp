@@ -26,8 +26,6 @@ class TWPartitionManager {
   TWPartition vendor, system, odm, product, data, boot;
   bool has_vendor = true;
   bool datamedia = false;
-  bool native_ui_vendor_ = false;
-  bool Prepare_Vendor_For_Native_UI(bool fastboot_mode);
   void UnMount_Main_Partitions();
   std::string Get_Android_Root_Path() { return "/system"; }
   TWPartition* Find_Partition_By_Path(const std::string& path) {
@@ -92,7 +90,6 @@ class KernelModuleLoader {
 #undef mount
 #undef umount2
 
-// ACTUAL_PREPARE
 // ACTUAL_MAIN_CLEANUP
 // ACTUAL_PROPERTY_PROBE
 
@@ -101,14 +98,14 @@ int main(int argc, char** argv) {
   auto& manager = PartitionManager;
   const std::string scenario = argv[1];
   if (scenario == "delayed") {
-    assert(manager.Prepare_Vendor_For_Native_UI(false));
+    manager.vendor.mounted = true;
     std::mutex mutex;
     std::condition_variable condition;
     bool cleanup_finished = false;
     std::thread renderer([&] {
       std::unique_lock<std::mutex> lock(mutex);
       condition.wait(lock, [&] { return cleanup_finished; });
-      assert(manager.vendor.Is_Mounted());
+      assert(!manager.vendor.Is_Mounted());
     });
     manager.ApexCleanup();
     manager.UnMount_Main_Partitions();
@@ -118,7 +115,7 @@ int main(int argc, char** argv) {
     }
     condition.notify_one();
     renderer.join();
-    assert(manager.vendor.unmounts == 0);
+    assert(manager.vendor.unmounts >= 1 && manager.vendor.mounts == 0);
     assert(manager.data.unmounts == 1 && manager.product.unmounts == 1);
   } else if (scenario == "unowned") {
     manager.vendor.mounted = true;
@@ -126,19 +123,20 @@ int main(int argc, char** argv) {
     assert(!manager.vendor.mounted && manager.vendor.unmounts == 1);
   } else if (scenario == "unavailable") {
     manager.has_vendor = false;
-    assert(manager.Prepare_Vendor_For_Native_UI(false));
-    assert(!manager.native_ui_vendor_ && manager.vendor.mounts == 0);
+    manager.UnMount_Main_Partitions();
+    assert(manager.vendor.mounts == 0 && manager.vendor.unmounts == 0);
     manager.has_vendor = true;
     manager.vendor.mount_ok = false;
-    assert(!manager.Prepare_Vendor_For_Native_UI(false));
-    assert(!manager.native_ui_vendor_);
+    manager.UnMount_Main_Partitions();
+    assert(manager.vendor.mounts == 0);
   } else if (scenario == "fastboot") {
-    assert(manager.Prepare_Vendor_For_Native_UI(true));
-    assert(!manager.native_ui_vendor_ && manager.vendor.mounts == 0);
-    assert(manager.Prepare_Vendor_For_Native_UI(false));
-    assert(manager.native_ui_vendor_ && manager.vendor.mounts == 1);
+    manager.vendor.mounted = true;
+    manager.datamedia = true;
+    manager.UnMount_Main_Partitions();
+    assert(!manager.vendor.mounted && manager.vendor.mounts == 0);
+    assert(manager.data.unmounts == 0);
   } else if (scenario == "explicit") {
-    assert(manager.Prepare_Vendor_For_Native_UI(false));
+    manager.vendor.mounted = true;
     assert(manager.UnMount_By_Path("/vendor", false));
     assert(!manager.vendor.mounted && manager.vendor.unmounts == 1);
   } else if (scenario == "probe") {
@@ -149,14 +147,14 @@ int main(int argc, char** argv) {
     Update_Encryption_Props_Before_Format();
     assert(!manager.vendor.mounted && manager.vendor.unmounts == 1);
   } else if (scenario == "module-cleanup") {
-    assert(manager.Prepare_Vendor_For_Native_UI(false));
+    manager.vendor.mounted = true;
     ModuleCleanupProbe();
     assert(manager.vendor.mounted && manager.vendor.unmounts == 0);
     manager.vendor.mounted = false;
     ModuleCleanupProbe();
     assert(!manager.vendor.mounted && manager.vendor.unmounts == 1);
   } else if (scenario == "module-bind") {
-    assert(manager.Prepare_Vendor_For_Native_UI(false));
+    manager.vendor.mounted = true;
     assert(KernelModuleLoader::Try_And_Load_Modules("/vendor/lib/modules", true) == 1);
     assert(unmounted_bind == "/vendor/lib/modules");
     assert(manager.vendor.mounted && manager.vendor.unmounts == 0);

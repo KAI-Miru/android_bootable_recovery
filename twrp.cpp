@@ -684,10 +684,6 @@ int main(int argc, char **argv) {
 	// Set the props for OrangeFox dynamic partitions
 	//PartitionManager.Fox_Set_Dynamic_Partition_Props();
 
-	// Keep native graphics inputs available through APEX/decryption cleanup,
-	// including when the early UI thread has not opened its libraries yet.
-	PartitionManager.Prepare_Vendor_For_Native_UI(startup.Get_Fastboot_Mode());
-
 	// start the UI
 	printf("Starting the UI...\n");
 	gui_init();

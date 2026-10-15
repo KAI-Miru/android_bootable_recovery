@@ -1,4 +1,4 @@
-"""Run recovery's actual mount-lifetime helpers against a fake partition backend."""
+"""Verify normal vendor release and temporary probe cleanup with fake partitions."""
 import shutil
 import subprocess
 import sys
@@ -36,9 +36,7 @@ class VendorUiMountTests(unittest.TestCase):
         start = setup.index("#ifndef USE_VENDOR_LIBS")
         end = setup.index("#endif", start) + len("#endif")
         template = (ROOT / "vendor_ui_mount_driver.cpp").read_text(encoding="utf-8")
-        source = template.replace("// ACTUAL_PREPARE", function(
-            cls.manager, "bool TWPartitionManager::Prepare_Vendor_For_Native_UI("))
-        source = source.replace("// ACTUAL_MAIN_CLEANUP", function(
+        source = template.replace("// ACTUAL_MAIN_CLEANUP", function(
             cls.manager, "void TWPartitionManager::UnMount_Main_Partitions("))
         source = source.replace("// ACTUAL_APEX_CLEANUP", setup[start:end])
         source = source.replace("// ACTUAL_PROPERTY_PROBE", function(
@@ -75,16 +73,16 @@ class VendorUiMountTests(unittest.TestCase):
                 subprocess.run([str(binary), name], check=True, timeout=5,
                                capture_output=True, text=True)
 
-    def test_delayed_renderer_keeps_vendor_through_both_cleanup_paths(self):
+    def test_delayed_renderer_does_not_keep_vendor_mounted(self):
         self.run_case("delayed")
 
     def test_normal_cleanup_still_releases_unowned_vendor(self):
         self.run_case("unowned")
 
-    def test_missing_vendor_and_failed_mount_do_not_claim_ownership(self):
+    def test_cleanup_handles_absent_or_unmountable_vendor_without_mounting_it(self):
         self.run_case("unavailable")
 
-    def test_cold_fastboot_does_not_acquire_a_vendor_mount(self):
+    def test_data_media_cleanup_releases_vendor_but_preserves_data(self):
         self.run_case("fastboot")
 
     def test_explicit_unmount_is_not_blocked(self):
@@ -99,22 +97,18 @@ class VendorUiMountTests(unittest.TestCase):
     def test_module_bind_cleanup_does_not_resolve_to_parent_vendor(self):
         self.run_case("module-bind")
 
-    def test_mount_ownership_is_acquired_before_starting_early_ui(self):
-        prepare = self.main.index("PartitionManager.Prepare_Vendor_For_Native_UI(startup.Get_Fastboot_Mode());")
-        self.assertLess(prepare, self.main.index("gui_init();", prepare))
+    def test_early_ui_does_not_acquire_a_vendor_mount(self):
+        self.assertNotIn("Prepare_Vendor_For_Native_UI", self.main)
+        self.assertNotIn("native_ui_vendor_", self.manager)
 
-    def test_return_from_fastboot_restores_ownership_before_partition_setup(self):
+    def test_return_from_fastboot_does_not_acquire_a_ui_vendor_mount(self):
         recovery = function(self.backend, "bool RecoveryLeaveFastbootd(")
-        self.assertLess(recovery.index("Prepare_All_Super_Volumes"),
-                        recovery.index("Prepare_Vendor_For_Native_UI(false)"))
-        self.assertLess(recovery.index("Prepare_Vendor_For_Native_UI(false)"),
-                        recovery.index("Setup_Fstab_Partitions(true)"))
+        self.assertNotIn("Prepare_Vendor_For_Native_UI", recovery)
+        self.assertLess(recovery.index("Prepare_All_Super_Volumes"), recovery.index("Setup_Fstab_Partitions(true)"))
 
-    def test_super_release_clears_ownership_only_after_success(self):
+    def test_super_release_keeps_its_existing_quiesce_and_unmount_checks(self):
         unmap = function(self.manager, "bool TWPartitionManager::Unmap_Super_Devices(")
-        release = unmap.index("native_ui_vendor_ = false;")
-        self.assertGreater(release, unmap.rindex("return false;"))
-        self.assertLess(release, unmap.rindex("return true;"))
+        self.assertNotIn("native_ui_vendor_", unmap)
         self.assertIn("QuiesceDynamicPartitionUsers()", unmap)
         self.assertIn("(*iter)->UnMount(false);", unmap)
 
