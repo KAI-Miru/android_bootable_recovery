@@ -43,6 +43,8 @@
 #include "aera_filesystem_format.hpp"
 #include <android-base/properties.h>
 #include <libsnapshot/snapshot.h>
+#include <libdm/dm.h>
+#include <chrono>
 
 #include "cutils/properties.h"
 #include "libblkid/include/blkid.h"
@@ -2327,6 +2329,26 @@ bool TWPartition::Decrypt(string Password) {
 	return 1;
 }
 
+// A metadata-encryption mapping can hold userdata even after /data is unmounted.
+// Remove it synchronously; never format the underlying device while it survives.
+#ifdef TW_INCLUDE_CRYPTO
+static bool Release_Userdata_Mapping() {
+	auto& dm = android::dm::DeviceMapper::Instance();
+	std::vector<android::dm::DeviceMapper::DmBlockDevice> devices;
+	if (!dm.GetAvailableDevices(&devices))
+		return false;
+	const auto is_userdata = [](const auto& device) { return device.name() == "userdata"; };
+	if (std::none_of(devices.begin(), devices.end(), is_userdata))
+		return true;
+	LOGINFO("Releasing userdata mapping before format.\n");
+	if (!dm.DeleteDevice("userdata", std::chrono::seconds(2)))
+		return false;
+	devices.clear();
+	return dm.GetAvailableDevices(&devices) &&
+		std::none_of(devices.begin(), devices.end(), is_userdata);
+}
+#endif
+
 bool TWPartition::Wipe_Encryption(const string& filesystem) {
 	bool Save_Data_Media = Has_Data_Media;
 	bool ret = false;
@@ -2362,10 +2384,10 @@ bool TWPartition::Wipe_Encryption(const string& filesystem) {
 #ifdef TW_INCLUDE_CRYPTO
 	if (!UnMount(true))
 		return false;
-	if (Is_Decrypted && !Decrypted_Block_Device.empty()) {
-//		if (delete_crypto_blk_dev((char*)("userdata")) != 0) {
-//			LOGERR("Error deleting crypto block device, continuing anyway.\n");
-//		}
+	if (Mount_Point == "/data" && !Release_Userdata_Mapping()) {
+		LOGERR("Unable to release userdata mapping; refusing to format.\n");
+		gui_msg(Msg(msg::kError, "unable_to_wipe=Unable to wipe {1}.")(Display_Name));
+		goto exit;
 	}
 #endif
 	Has_Data_Media = false;
@@ -2800,20 +2822,6 @@ bool TWPartition::Wipe_F2FS() {
 			TWFunc::Exec_Cmd("umount -f /sdcard /data", nul);
 			usleep(32768);
 		}
-	#endif
-
-	#if defined(OF_USE_DMCTL) || defined(TW_USE_DMCTL)
-	if (TWFunc::Path_Exists("/dev/block/mapper/userdata")) {
-		LOGINFO("AERA: running dmctl before formatting...\n");
-		TWFunc::Exec_Cmd("dmctl delete userdata", false);
-		usleep(32768);
-	}
-	#elif defined(AERA_USE_DMSETUP)
-	if (TWFunc::Path_Exists("/dev/block/mapper/userdata")) {
-		LOGINFO("AERA: running dmsetup before formatting...\n");
-		TWFunc::Exec_Cmd("dmsetup remove -f userdata", false);
-		usleep(32768);
-	}
 	#endif
 
 	if (TWFunc::Exec_Cmd(f2fs_command) == 0) {
