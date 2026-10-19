@@ -52,6 +52,7 @@ struct TWFunc {
         cls.assertions = runner
         sections = [definition(runner, 'struct HardwareState') + ';',
                     definition(runner, 'void AdjustVolume('),
+                    definition(runner, 'bool SynchronizeScreenState('),
                     definition(runner, 'bool HandleEvent('),
                     definition(runner, 'void CheckScreenTimeout(')]
         source = (ROOT / 'aeraui/tests/screen_timer_driver.cpp').read_text(encoding='utf-8')
@@ -83,6 +84,10 @@ struct TWFunc {
 
     def test_device_timeout_opt_out_is_preserved(self):
         self.run_mode('disabled')
+
+    def test_native_loop_reconciles_external_timer_changes_without_input(self):
+        start = self.assertions.index('    for (;;) {\n        SynchronizeScreenState(engine, hardware);')
+        self.assertLess(start, self.assertions.index('const int wait_ms = static_cast<int>(engine.RunFrame());', start))
 
     def test_native_loop_checks_inactivity_once_after_input(self):
         call = 'CheckScreenTimeout(engine, hardware);'

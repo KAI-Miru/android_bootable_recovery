@@ -125,5 +125,61 @@ int main() {
   power.value = 0;
   HandleEvent(engine, performance, hardware, power);
   assert(!hardware.screen_off);
+
+  // A settings reload can wake the timer outside the renderer loop. The
+  // first subsequent input must reconcile the UI state and show the lock,
+  // rather than leaving a lit display with all input discarded.
+  theme.aod = false;
+  Engine reloaded;
+  HardwareState reload_hardware;
+  aeraScreenTimer.SetTimeout(60);
+  now_seconds += 60;
+  CheckScreenTimeout(reloaded, reload_hardware);
+  assert(reload_hardware.screen_off && reloaded.suspended);
+  aeraScreenTimer.SetTimeout(120);
+  assert(brightness == "1234" && !aeraScreenTimer.IsScreenOff());
+  HandleEvent(reloaded, performance, reload_hardware, touch);
+  assert(!reload_hardware.screen_off && !reloaded.suspended);
+  assert(reloaded.locks == 1 && reloaded.pointers == 0);
+  HandleEvent(reloaded, performance, reload_hardware, touch);
+  assert(reloaded.pointers == 1);
+
+  // Legacy blank/wake calls must also synchronize without a touch arriving.
+  aeraScreenTimer.Blank();
+  assert(!SynchronizeScreenState(reloaded, reload_hardware));
+  assert(reload_hardware.screen_off && reloaded.suspended);
+  aeraScreenTimer.Wake();
+  assert(SynchronizeScreenState(reloaded, reload_hardware));
+  assert(!reload_hardware.screen_off && !reloaded.suspended);
+  assert(reloaded.locks == 2);
+  assert(!SynchronizeScreenState(reloaded, reload_hardware));
+  assert(reloaded.locks == 2);  // Don't rebuild or clear the bouncer per frame.
+
+  // An external wake between Power down/up must not blank on its release.
+  aeraScreenTimer.Blank();
+  SynchronizeScreenState(reloaded, reload_hardware);
+  aeraScreenTimer.Wake();
+  power.value = 0;
+  HandleEvent(reloaded, performance, reload_hardware, power);
+  assert(!reload_hardware.screen_off && !aeraScreenTimer.IsScreenOff());
+  assert(!reloaded.suspended && reloaded.locks == 3);
+  aeraScreenTimer.Blank();
+  SynchronizeScreenState(reloaded, reload_hardware);
+  aeraScreenTimer.Wake();
+  power.value = 1;
+  HandleEvent(reloaded, performance, reload_hardware, power);
+  power.value = 0;
+  HandleEvent(reloaded, performance, reload_hardware, power);
+  assert(!reload_hardware.screen_off && !reloaded.suspended);
+
+  // The frame loop can observe the wake before the Power release is read.
+  aeraScreenTimer.Blank();
+  SynchronizeScreenState(reloaded, reload_hardware);
+  reload_hardware.power_down = true;
+  aeraScreenTimer.Wake();
+  assert(SynchronizeScreenState(reloaded, reload_hardware));
+  power.value = 0;
+  HandleEvent(reloaded, performance, reload_hardware, power);
+  assert(!reload_hardware.screen_off && !aeraScreenTimer.IsScreenOff());
 #endif
 }

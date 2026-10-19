@@ -274,8 +274,37 @@ void AdjustVolume(Engine& engine, InteractionBoost& performance,
     engine.ShowVolume(hardware.volume);
 }
 
+// Settings restoration and legacy backend callers can wake or blank the
+// timer outside this loop. Reconcile the renderer/input gate with its state;
+// otherwise restoring brightness leaves the old screen_off flag dropping input.
+// An external wake must build the lock overlay before input is accepted.
+bool SynchronizeScreenState(Engine& engine, HardwareState& hardware) {
+    const bool off = aeraScreenTimer.IsScreenOff();
+    if (off == hardware.screen_off) return false;
+    const bool woke = !off;
+    if (woke) {
+        if (hardware.power_down) hardware.woke_on_power = true;
+        engine.ShowLockScreen();
+        engine.SetSuspended(false);
+        __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                            "display wake synchronized with lock screen");
+    } else {
+        const bool ambient = RecoveryLockTheme().aod;
+        if (ambient) engine.ShowLockScreen(true);
+        engine.SetSuspended(!ambient);
+    }
+    hardware.screen_off = off;
+    return woke;
+}
+
 bool HandleEvent(Engine& engine, InteractionBoost& performance,
                  HardwareState& hardware, const input_event& event) {
+    if (SynchronizeScreenState(engine, hardware)) {
+        // Do not replay a contact/key from the suspended screen onto a newly
+        // opened lock or credential scene. A Power release must not reblank it.
+        if (event.type != EV_KEY || event.code != KEY_POWER) return false;
+        hardware.woke_on_power = true;
+    }
     if (event.type == EV_REL ||
         (event.type == EV_KEY && event.code >= BTN_MOUSE && event.code < BTN_JOYSTICK)) {
         if (hardware.screen_off) return false;
@@ -492,6 +521,7 @@ RunResult RunLoop(bool fastboot_mode = false,
     bool decrypt_request_sent = false;
     Action cli_transition_action = Action::kNone;
     for (;;) {
+        SynchronizeScreenState(engine, hardware);
         /* Boot and decryption have no continuous touch stream to renew the
          * interaction window. Keep the clocks up until the recovery backend
          * is ready, then retain the boost long enough for the wordmark outro
