@@ -80,8 +80,8 @@ void CloseStatusBarShades() { ++closed; }
 void lv_obj_delete_async(int* object) { assert(*object==7); ++deleted; }
 struct Engine {
   int old=7,next=9; int* lock_overlay_=nullptr;
-  int screen_credential_scene_=5; int builds=0;
-  void ShowLockScreen() { assert(lock_overlay_==nullptr && screen_credential_scene_==0); lock_overlay_=&next; ++builds; }
+  int screen_credential_scene_=5; int builds=0; bool lock_ambient_=false;
+  void ShowLockScreen(bool ambient) { assert(ambient==lock_ambient_); assert(lock_overlay_==nullptr && screen_credential_scene_==0); lock_overlay_=&next; ++builds; }
 '''+method+'''
 };
 int main() {

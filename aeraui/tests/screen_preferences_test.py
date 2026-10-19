@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class ScreenPreferencesTests(unittest.TestCase):
     def test_shared_preferences_save_and_restore_without_early_cache(self):
         source = (ROOT / 'aeraui/platform/aera_backend.cpp').read_text(encoding='utf-8')
-        header = (ROOT / 'aeraui/include/aeraui/backend.hpp').read_text(encoding='utf-8')
+        header = '\n'.join(p.read_text(encoding='utf-8') for p in (ROOT / 'aeraui/include/aeraui').glob('*.hpp'))
         save = definition(source, 'bool SaveAeraPreferences(bool require_early) {')
         load = definition(source, 'void LoadAeraPreferencesIfAvailable() {')
         getters = set(re.findall(r'(Recovery\w+)\(\)', save)) - {'RecoveryScreenTimeout'}
@@ -34,12 +34,16 @@ class ScreenPreferencesTests(unittest.TestCase):
         # The codec's bound must precede its use.
         parts = [parts[-1]] + parts[:-1]
         program = '''#include <algorithm>
+#include <atomic>
+#include <thread>
+#include <sys/stat.h>
 #include <cassert>
 #include <cerrno>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include "aeraui/backend.hpp"
+namespace aera::shared_storage { void NormalizeAll() {} }
 using namespace aeraui;
 struct DataManager {
   static inline int timeout = 60;
@@ -60,6 +64,9 @@ namespace aeraui {
 std::string kAeraPreferencesPath;
 constexpr const char* kFastbootWifiPreference = "fastboot_wifi";
 EarlyUiPreferences gEarlyDefaults{};
+bool gPrimaryWifiPreferencesLoaded = false;
+EarlyUiPreferences CaptureCurrentEarlyUiPreferences() { return {}; }
+bool SaveEarlyWifiPreferences() { return false; }
 void CaptureEarlyDefaultsIfNeeded() { gEarlyDefaults.screen_timeout=60; }
 void LoadEarlyUiPreferencesIfAvailable() {}
 bool SaveEarlyUiPreferences() { return false; } // Device has no early cache.
@@ -90,7 +97,7 @@ int main(int argc, char** argv) {
             (folder / 'shared.cpp').write_text(program, encoding='utf-8')
             result = subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
                 '-I', str(ROOT / 'aeraui/include'), str(folder / 'shared.cpp'),
-                '-o', str(folder / 'shared')], capture_output=True, text=True)
+                str(ROOT / 'aeraui/features/developer/kernel_settings.cpp'), '-o', str(folder / 'shared')], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             for seconds in (0, 15, 30, 60, 600, 3600):
                 subprocess.run([str(folder / 'shared'), str(folder / 'preferences.conf'), str(seconds)],
@@ -106,6 +113,9 @@ int main(int argc, char** argv) {
             pieces.append(definition(source, name))
         constants = '\n'.join(re.findall(r'constexpr int kDockLayoutMax[^;]+;', source))
         program = '''#include <algorithm>
+#include <atomic>
+#include <thread>
+#include <sys/stat.h>
 #include <cassert>
 #include <cerrno>
 #include <cstdlib>
@@ -150,7 +160,7 @@ int main() {
             for flags in ([], ['-DTW_NO_SCREEN_TIMEOUT']):
                 result = subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
                     '-I', str(ROOT / 'aeraui/include'), *flags, str(path / 'driver.cpp'),
-                    '-o', str(path / 'driver')], capture_output=True, text=True)
+                    str(ROOT / 'aeraui/features/developer/kernel_settings.cpp'), '-o', str(path / 'driver')], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 subprocess.run([str(path / 'driver')], check=True, timeout=5)
 

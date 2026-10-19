@@ -31,7 +31,7 @@ class ScreenTimerTests(unittest.TestCase):
         (cls.path / 'data.hpp').write_text('''#pragma once
 #include <string>
 struct DataManager {
-  static int GetIntValue(const char*) { return 1; }
+  static int GetIntValue(const char* key) { return std::string(key)=="tw_brightness_max" ? 100 : 1; }
   static void GetValue(const char*, std::string& value) { value = "1234"; }
 };
 ''', encoding='utf-8')
@@ -84,10 +84,11 @@ struct TWFunc {
     def test_device_timeout_opt_out_is_preserved(self):
         self.run_mode('disabled')
 
-    def test_native_loop_checks_inactivity_without_resetting_it_each_frame(self):
-        self.assertIn('CheckScreenTimeout(engine, hardware);', self.assertions)
-        self.assertLess(self.assertions.index('CheckScreenTimeout(engine, hardware);'),
-                        self.assertions.index('const int wait_ms = static_cast<int>(engine.RunFrame());'))
+    def test_native_loop_checks_inactivity_once_after_input(self):
+        call = 'CheckScreenTimeout(engine, hardware);'
+        self.assertEqual(self.assertions.count(call), 1)
+        self.assertGreater(self.assertions.index(call),
+                           self.assertions.index('HandleEvent(engine, performance, hardware, event)'))
 
 
 if __name__ == '__main__':

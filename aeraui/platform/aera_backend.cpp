@@ -1,6 +1,7 @@
 /* Copyright (C) 2026 AERA Recovery Project contributors
  * SPDX-License-Identifier: Apache-2.0 */
 #include <aeraui/backend.hpp>
+#include <aeraui/screen_timeout.hpp>
 #include "../../aera_remote/backup_cancel.hpp"
 #include "aeraui/features/update/payload_inspector.hpp"
 #include "aeraui/features/update/payload_arb.hpp"
@@ -10,6 +11,7 @@
 #include "aeraui/features/update/payload_parallel.hpp"
 #include "aeraui/features/update/payload_otaripper_batch.hpp"
 #include <android-base/unique_fd.h>
+#include <openssl/crypto.h>
 
 #include <algorithm>
 #include <atomic>
@@ -33,18 +35,25 @@
 #include <sys/mount.h>
 #include <sys/ioctl.h>
 #include <linux/fs.h>
+#include <linux/input.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/utsname.h>
+#include <sys/sysmacros.h>
+#include <mntent.h>
 #include <unistd.h>
 
 #include <cutils/properties.h>
+#include <private/android_filesystem_config.h>
 #include <android-base/properties.h>
 
 #include "data.hpp"
+#include "aera_flash_log.hpp"
 #include "aera_secrets/aera_secrets.hpp"
 #include "aeraui/features/root/root_manager.hpp"
 #include "partitions.hpp"
 #include "twrp-functions.hpp"
+#include "../../aera_shared_storage.hpp"
 #include "variables.h"
 #include <set_metadata.h>
 #include "aeraui/platform/aera_ui_host.hpp"
@@ -52,6 +61,7 @@
 #include "aera_remote/pc_storage.hpp"
 #include "aeraui/features/backup/app_vault.hpp"
 #include "aeraui/platform/image_targets.hpp"
+#include "unencrypted_users.hpp"
 #include "temperature_reader.hpp"
 #include "screen_lock.hpp"
 #include "android_screen_credential.hpp"
@@ -115,10 +125,14 @@ int aeraui::RecoveryDecrypt(const std::string &credential, int user_id) {
 namespace aeraui {
 namespace {
 void LoadAeraPreferencesIfAvailable();
+bool WriteFileAtomically(const std::string &path, const std::string &contents);
+kernel::Settings gDeveloperSettings;
 bool SaveAeraPreferences(bool require_early = false);
 bool ResetAeraSettings(bool theme);
+bool ResetAeraThemeSection(ThemeSection section);
 int DefaultHapticDuration(Haptic haptic);
 std::atomic<bool> gSideloadActive{false};
+std::atomic<uint64_t> gNasManualDisconnect{0};
 std::atomic<bool> gSideloadCancelRequested{false};
 std::atomic<uint64_t> gSideloadReceivedBytes{0};
 std::atomic<uint64_t> gSideloadTotalBytes{0};
@@ -329,6 +343,12 @@ std::vector<AndroidUser> RecoveryAndroidUsers() {
                         user.isDecrypted});
     }
   }
+  if (result.empty()) {
+    auto *data = PartitionManager.Find_Partition_By_Path("/data");
+    if (data && data->Is_Mounted() && !RecoveryDataLocked())
+      return UnencryptedAndroidUsers("/data", true,
+                                     PartitionManager.Storage_Is_Encrypted());
+  }
   std::sort(result.begin(), result.end(),
             [](const AndroidUser &left, const AndroidUser &right) {
               return left.id < right.id;
@@ -361,6 +381,116 @@ std::vector<FilesystemVolume> RecoveryFilesystemVolumes() {
     if (!choices.empty()) result.push_back({volume.name, volume.path, part->Current_File_System, choices});
   }
   return result;
+}
+
+UsbFormatTarget RecoveryUsbFormatTarget(const std::string &path) {
+  UsbFormatTarget result;
+  result.path = path;
+  const auto storage = RecoveryVolumes("storage");
+  const auto wipe = RecoveryVolumes("wipe");
+  const auto volume = std::find_if(storage.begin(), storage.end(),
+      [&](const Volume &v) { return v.path == path; });
+  if (volume == storage.end() || std::none_of(wipe.begin(), wipe.end(),
+      [&](const Volume &v) { return v.path == path; })) return result;
+  auto *partition = PartitionManager.Find_Partition_By_Path(path);
+  if (!partition || partition->Get_Mount_Point() != path || !partition->Is_Present) return result;
+  struct stat block{};
+  char canonical[PATH_MAX]{};
+  if (!realpath(partition->Actual_Block_Device.c_str(), canonical) ||
+      stat(canonical, &block) || !S_ISBLK(block.st_mode)) return result;
+  result.block = canonical;
+  const std::string sys = "/sys/dev/block/" + std::to_string(major(block.st_rdev)) +
+      ":" + std::to_string(minor(block.st_rdev));
+  if (!realpath(sys.c_str(), canonical)) return result;
+  const std::string device = canonical;
+  // Only real USB-backed partitions, never internal UFS/eMMC, device-mapper,
+  // network storage, or the parent disk containing a partition table.
+  if (device.find("/usb") == std::string::npos ||
+      access((device + "/partition").c_str(), F_OK)) return result;
+  result.available = true;
+  result.name = volume->name;
+  result.filesystem = partition->Current_File_System;
+  const int fd = open(result.block.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+  if (fd < 0) { result.error = "Could not open USB partition."; return result; }
+  const bool size_ok = ioctl(fd, BLKGETSIZE64, &result.bytes) == 0 && result.bytes;
+  close(fd);
+  std::string sequence;
+  std::ifstream(device.substr(0, device.find_last_of('/')) + "/diskseq") >> sequence;
+  if (!size_ok || sequence.empty()) {
+    result.error = "This device cannot safely identify the USB attachment. Formatting is unavailable.";
+    return result;
+  }
+  result.identity = device + ":" + sequence + ":" + std::to_string(result.bytes);
+  std::ifstream filesystems("/proc/filesystems");
+  const std::string supported((std::istreambuf_iterator<char>(filesystems)), {});
+  for (const auto &fs : std::vector<std::pair<std::string, std::string>>{
+      {"vfat", "/system/bin/mkfs.fat"}, {"exfat", "/system/bin/mkexfatfs"},
+      {"ext4", "/system/bin/mke2fs"}, {"f2fs", "/system/bin/make_f2fs"}}) {
+    if (!access(fs.second.c_str(), X_OK) && supported.find(fs.first) != std::string::npos)
+      result.filesystems.push_back(fs.first);
+  }
+  if (result.filesystems.empty()) result.error = "No supported USB formatting tools are available.";
+  return result;
+}
+
+static int FormatUsb(const JobRequest &request) {
+  const auto target = RecoveryUsbFormatTarget(request.path);
+  if (request.confirmation != "format-usb" || !request.partitions.empty() ||
+      !target.available || !target.error.empty() || target.identity.empty() ||
+      target.identity != request.usb_identity ||
+      std::find(target.filesystems.begin(), target.filesystems.end(), request.usb_filesystem) == target.filesystems.end()) {
+    LOGERR("USB format refused: target changed or request is not authorized.\n");
+    return 1;
+  }
+  auto *partition = PartitionManager.Find_Partition_By_Path(request.path);
+  PartitionManager.Remove_MTP_Storage(request.path);
+  const auto finish = [&](int result) {
+    PartitionManager.Update_System_Details();
+    if (partition->Is_Mounted()) PartitionManager.Add_MTP_Storage(request.path);
+    return result;
+  };
+  if (!partition->UnMount(true)) return finish(1);
+  const auto current = RecoveryUsbFormatTarget(request.path);
+  if (current.identity != target.identity || !current.error.empty()) return finish(1);
+  android::base::unique_fd fd(open(target.block.c_str(), O_RDWR | O_CLOEXEC));
+  struct stat block{};
+  if (fd.get() < 0 || fstat(fd.get(), &block)) return finish(1);
+  uint64_t disk_sequence = 0, capacity = 0;
+  constexpr unsigned long kGetDiskSequence = _IOR(0x12, 128, uint64_t);
+  const auto sequence_end = target.identity.find_last_of(':');
+  const auto sequence_start = target.identity.find_last_of(':', sequence_end - 1);
+  if (ioctl(fd.get(), kGetDiskSequence, &disk_sequence) ||
+      ioctl(fd.get(), BLKGETSIZE64, &capacity) || capacity != target.bytes ||
+      std::to_string(disk_sequence) != target.identity.substr(sequence_start + 1,
+          sequence_end - sequence_start - 1)) return finish(1);
+  // Reject mounted aliases too; never force or lazily unmount a busy drive.
+  FILE *mounts = setmntent("/proc/mounts", "r");
+  if (!mounts) return finish(1);
+  bool mounted = false;
+  while (auto *entry = getmntent(mounts)) {
+    struct stat source{};
+    if (!stat(entry->mnt_fsname, &source) && S_ISBLK(source.st_mode) &&
+        source.st_rdev == block.st_rdev) mounted = true;
+  }
+  endmntent(mounts);
+  if (mounted || RecoveryUsbFormatTarget(request.path).identity != target.identity) return finish(1);
+  // Pin the opened partition for the formatter instead of resolving a changing
+  // /dev/block symlink. Only fixed tool names and numeric fd paths reach shell.
+  const std::string pinned = "/proc/" + std::to_string(getpid()) + "/fd/" + std::to_string(fd.get());
+  const std::string command = request.usb_filesystem == "vfat" ? "/system/bin/mkfs.fat -F 32 " :
+      request.usb_filesystem == "exfat" ? "/system/bin/mkexfatfs " :
+      request.usb_filesystem == "f2fs" ? "/system/bin/make_f2fs -f " :
+      "/system/bin/mke2fs -t ext4 -F ";
+  DataManager::SetValue("tw_partition", request.path);
+  if (TWFunc::Exec_Cmd(command + pinned) != 0 || fsync(fd.get()) != 0) return finish(1);
+  if (RecoveryUsbFormatTarget(request.path).identity != target.identity) return finish(1);
+  partition->Check_FS_Type();
+  if (partition->Current_File_System != request.usb_filesystem || !partition->Mount(true)) {
+    LOGERR("USB formatted, but filesystem verification or remount failed.\n");
+    return finish(1);
+  }
+  DataManager::SetValue("ui_progress", 100);
+  return finish(0);
 }
 
 static std::map<std::string, images::Block> NamedImageBlocks() {
@@ -433,6 +563,12 @@ std::vector<PayloadFlashTarget> RecoveryPayloadTargets(const std::vector<std::st
 }
 
 std::string RecoveryStorage() { return DataManager::GetCurrentStoragePath(); }
+std::string RecoveryInternalStorage() {
+  if (RecoveryDataLocked()) return {};
+  const auto configured = DataManager::GetStrValue(TW_INTERNAL_PATH);
+  if (!configured.empty()) return configured;
+  return "/sdcard";
+}
 std::string RecoveryBackupRoot() { return DataManager::GetStrValue(TW_BACKUPS_FOLDER_VAR); }
 bool RecoveryDeleteBackup(const std::string &folder) {
   std::string canonical_backup;
@@ -753,7 +889,16 @@ int RecoveryRunPcBackup(const JobRequest &request) {
   };
   if (request.backup_kind != "recovery" && !apps) return fail("Unknown backup type.");
   if (request.backup_action != "apps" && request.backup_action != "inspect" &&
-      request.backup_action != "snapshots" && !backup && !restore) return fail("Unknown backup operation.");
+      request.backup_action != "snapshots" && request.backup_action != "storage" &&
+      !backup && !restore) return fail("Unknown backup operation.");
+  if (!computer || (restore && request.backup_method == "transfer")) {
+    std::string error;
+    if (!RecoveryPrepareBackupStorage(request.backup_storage, &error)) return fail(error);
+  }
+  if (request.backup_action == "storage") {
+    result["detail"] = "Storage ready";
+    UpdateBackupResult(result); return 0;
+  }
   if (computer && request.backup_action != "apps") {
     if (PartitionManager.Find_Partition_By_Path(storage::kMount)) return fail("Computer storage is already in use.");
     RecoveryEnsurePcStorage(); virtual_storage = true;
@@ -892,6 +1037,79 @@ bool RecoverySetStorage(const std::string &path) {
   return true;
 }
 
+std::vector<BackupStorage> RecoveryBackupStorages() {
+  std::vector<BackupStorage> result;
+  std::set<std::string> seen;
+  const auto nas = RecoveryNasStatus();
+  for (const auto &volume : RecoveryVolumes("storage")) {
+    if (volume.path == "/pc" || volume.path == "/storage") continue;
+    auto *part = PartitionManager.Find_Partition_By_Path(volume.path);
+    const bool network = volume.path == "/mnt/nas";
+    if (!part || (network ? (!nas.supported || nas.config.host.empty()) :
+        (!part->Is_Present || (part->Get_Mount_Point() == "/data" && RecoveryDataLocked()))))
+      continue;
+    char canonical[PATH_MAX]{};
+    const std::string identity = realpath(volume.path.c_str(), canonical) ? canonical : volume.path;
+    if (!seen.insert(identity).second) continue;
+    const bool mounted = network ? nas.mounted : part->Is_Mounted();
+    struct statvfs info{};
+    const uint64_t free = mounted && statvfs(volume.path.c_str(), &info) == 0
+        ? uint64_t(info.f_bavail) * info.f_frsize : 0;
+    result.push_back({volume.name, volume.path, mounted, free});
+  }
+  return result;
+}
+
+bool RecoveryBackupPathReady(const std::string &path) {
+  auto *part = PartitionManager.Find_Partition_By_Path(path);
+  if (!part || !part->Is_Mounted() ||
+      (part->Get_Mount_Point() == "/data" && RecoveryDataLocked())) return false;
+#ifdef OF_ENABLE_WLAN
+  if (PartitionManager.Is_NAS_Path(path) && !NasManager::IsMounted()) return false;
+#endif
+  return true;
+}
+
+bool RecoveryPrepareBackupStorage(const std::string &path, std::string *error) {
+  const auto storages = RecoveryBackupStorages();
+  if (std::none_of(storages.begin(), storages.end(),
+      [&](const BackupStorage &item) {
+        if (item.path == path) return true;
+        char left[PATH_MAX]{}, right[PATH_MAX]{};
+        return realpath(item.path.c_str(), left) && realpath(path.c_str(), right) &&
+            !strcmp(left, right);
+      }) ||
+      !PartitionManager.Mount_By_Path(path, true) || !RecoveryBackupPathReady(path) ||
+      access(path.c_str(), R_OK | W_OK) != 0) {
+    if (error) *error = "Storage unavailable";
+    return false;
+  }
+  struct statvfs info{};
+  if (statvfs(path.c_str(), &info) != 0 || (info.f_flag & ST_RDONLY)) {
+    if (error) *error = "Storage unavailable";
+    return false;
+  }
+  return true;
+}
+
+std::string RecoveryAppVaultStorage() {
+  LoadAeraPreferencesIfAvailable();
+  const auto path = DataManager::GetStrValue("aera_appvault_storage");
+  if (!path.empty()) return path;
+  for (const auto &storage : RecoveryBackupStorages()) {
+    auto *part = PartitionManager.Find_Partition_By_Path(storage.path);
+    if (part && part->Get_Mount_Point() == "/data") return storage.path;
+  }
+  return "/sdcard";
+}
+
+bool RecoveryRememberAppVaultStorage(const std::string &path) {
+  if (path.empty() || path.front() != '/' || path.size() > 1024 ||
+      path.find_first_of("\r\n") != std::string::npos) return false;
+  DataManager::SetValue("aera_appvault_storage", path);
+  return SaveAeraPreferences();
+}
+
 std::vector<Volume> RecoveryRestoreVolumes(const std::string &folder) {
   DataManager::SetValue("tw_restore_list", "");
   DataManager::SetValue("tw_restore_selected", "");
@@ -953,7 +1171,25 @@ std::atomic<int> gPayloadVerifyProgress{0};
 payload::FlashProgressStore gPayloadProgress;
 }
 PayloadFlashProgress RecoveryPayloadFlashProgress() { return gPayloadProgress.Read(); }
+static int RecoveryRunJobImpl(const JobRequest &request);
 int RecoveryRunJob(const JobRequest &request) {
+  const char *method = request.job == Job::kInstall ? "ZIP installation" :
+      request.job == Job::kSideload ? "ADB sideload" :
+      request.job == Job::kFlashPayload ? "Advanced payload flash" :
+      request.job == Job::kFlashImage ? "Image flash" : nullptr;
+  if (!method) return RecoveryRunJobImpl(request);
+  std::string details = request.title;
+  if (!request.name.empty()) details += " / file name: " + request.name;
+  if (request.job == Job::kFlashImage) details += request.both_slots ? " / both slots" : " / current slot";
+  if (request.job == Job::kFlashPayload)
+    details += std::string(" / direct=") + (request.payload_direct ? "1" : "0") +
+        " / full=" + (request.payload_full ? "1" : "0") +
+        " / manual protection override=" + (request.payload_override_protection ? "1" : "0");
+  for (const auto &partition : request.partitions) details += " / " + partition;
+  aera::flashlog::Recording recording(request.path, method, details);
+  return recording.Finish(RecoveryRunJobImpl(request));
+}
+static int RecoveryRunJobImpl(const JobRequest &request) {
   if (request.job == Job::kFormatData && !FormatDataAuthorized(request)) return 1;
   if (request.job == Job::kChangeFilesystem && !FilesystemFormatAuthorized(request)) return 1;
   if (request.job == Job::kClearSnapshotCow &&
@@ -1211,6 +1447,7 @@ int RecoveryRunJob(const JobRequest &request) {
     std::vector<char> folder(pattern.begin(), pattern.end()); folder.push_back('\0');
     if (!mkdtemp(folder.data())) return fail("Cannot create a new extraction folder");
     const std::string directory(folder.data());
+    aera::shared_storage::RepairOnExit shared_extraction_permissions(directory);
     struct Performance {
       Performance() { TWFunc::SetPerformanceMode(true); }
       ~Performance() {
@@ -1309,6 +1546,32 @@ int RecoveryRunJob(const JobRequest &request) {
   }
   if (request.job == Job::kInstall) return aeraui_install_package(request.path.c_str());
   if (request.job == Job::kPcBackupOperation) return RecoveryRunPcBackup(request);
+  if (request.job == Job::kNetworkStorage) {
+    std::string error;
+    if (request.nas_action == "disconnect")
+      return RecoveryRunNas({NasOperation::kUnmount});
+    const auto current = RecoveryNasStatus();
+    if (!current.supported || current.mounted || RecoveryDataLocked()) return 1;
+    auto config = request.nas_config;
+    const auto remembered = RecoverySavedNasConfig(config.type);
+    config.auto_connect = remembered.auto_connect;
+    config.wifi_ssid = remembered.wifi_ssid;
+    if (!request.nas_password_update && config.host == remembered.host &&
+        config.user == remembered.user && config.auth == remembered.auth)
+      config.password = remembered.password;
+    if (!request.nas_private_key.empty() &&
+        !RecoveryImportNasKey(request.nas_private_key, config.key_name, &error)) {
+      DataManager::SetValue("tw_file_progress", error); return 1;
+    }
+    if (!RecoverySetNasConfig(config, &error)) {
+      DataManager::SetValue("tw_file_progress", error); return 1;
+    }
+    if (request.nas_action == "save") return 0;
+    if (request.nas_action != "connect") return 1;
+    const int result = RecoveryRunNas({NasOperation::kMountAndUse});
+    if (result) DataManager::SetValue("tw_file_progress", RecoveryNasStatus().error);
+    return result;
+  }
   if (request.job == Job::kRootOperation) {
     if (!root::Enabled()) return 1;
     root::Request operation;
@@ -1391,7 +1654,7 @@ int RecoveryRunJob(const JobRequest &request) {
     DataManager::SetValue("tw_partition", "NAS upload");
     DataManager::SetProgress(0.0f);
     SetBackupUploadProgress(0, total);
-    NasManager::ResetTransferStats();
+    if (!NasManager::ResetTransferStats(destination)) return 1;
     uint64_t copied = 0;
     TWFunc::SetPerformanceMode(true);
     bool ok = CopyBackupTree(canonical_backup, destination, total, &copied);
@@ -1515,6 +1778,7 @@ int RecoveryRunJob(const JobRequest &request) {
     TWFunc::SetPerformanceMode(false);
     return result;
   }
+  if (request.job == Job::kFormatUsb) return FormatUsb(request);
   if (request.job == Job::kFormatData || request.job == Job::kChangeFilesystem) {
     if (request.job == Job::kChangeFilesystem) {
       const auto available = RecoveryFilesystemVolumes();
@@ -1584,8 +1848,20 @@ int RecoveryRunJob(const JobRequest &request) {
       DataManager::SetValue(TW_SKIP_DIGEST_GENERATE_VAR,
                             request.digest && RecoveryPreference(Preference::kBackupChecksums) ? 0 : 1);
       DataManager::SetValue("tw_encrypt_backup", 0);
-      if (PartitionManager.Check_Backup_Name(backup_name, true, true) == 0)
-        result = PartitionManager.Run_Backup(false) ? 0 : 1;
+      if (PartitionManager.Check_Backup_Name(backup_name, true, true) == 0) {
+        const std::string folder = RecoveryBackupRoot() + "/" + backup_name;
+        if (TWFunc::Create_Dir_Recursive(folder, 0777, AID_MEDIA_RW, AID_MEDIA_RW)) {
+          const std::string marker_path = folder + "/.aera-incomplete";
+          const int marker = open(marker_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+          if (marker >= 0) {
+            if (close(marker) == 0) {
+              const int complete = PartitionManager.Run_Backup(false);
+              if (complete == 1 && !aera::pc::BackupCancelRequested() && unlink(marker_path.c_str()) == 0)
+                result = 0;
+            }
+          }
+        }
+      }
     }
   } else if (request.job == Job::kRestore) {
     DataManager::SetValue("tw_restore", request.path);
@@ -1609,7 +1885,23 @@ int RecoveryRunJob(const JobRequest &request) {
   return result;
 }
 
+NasTransferProgress RecoveryNasTransferProgress() {
+#ifdef OF_ENABLE_WLAN
+  const auto progress = NasManager::GetTransferProgress();
+  return {progress.active, progress.confirming, progress.uploaded, progress.total,
+          progress.pending, progress.bytes_per_second};
+#else
+  return {};
+#endif
+}
+void RecoveryCancelNasWrites() {
+#ifdef OF_ENABLE_WLAN
+  NasManager::CancelPendingUploads();
+#endif
+}
 int RecoveryProgress() {
+  const auto nas = RecoveryNasTransferProgress();
+  if (nas.active && nas.total) return std::min(99, static_cast<int>(nas.uploaded * 100 / nas.total));
   const auto payload = gPayloadProgress.Read();
   if (payload.available) return aeraui::payload::OverallProgress(payload);
   int raw = std::clamp(atoi(DataManager::GetStrValue("ui_progress").c_str()), 0, 100);
@@ -1623,6 +1915,13 @@ int RecoveryProgress() {
   return raw;
 }
 std::string RecoveryOperationDetail() {
+  const auto nas = RecoveryNasTransferProgress();
+  if (nas.active) {
+    std::ostringstream output;
+    output << "NAS upload\n" << nas.uploaded / 1000000 << " MB of " << nas.total / 1000000
+           << " MB\n" << nas.pending / 1000000 << " MB pending";
+    return output.str();
+  }
   std::string text = DataManager::GetStrValue("tw_operation");
   const auto partition = DataManager::GetStrValue("tw_partition");
   if (!partition.empty()) text += " / " + partition;
@@ -1752,6 +2051,7 @@ bool RecoverySetScreenTimeout(int seconds) {
   return DataManager::SetValue("tw_screen_timeout_secs", seconds) == 0;
 }
 
+bool RecoveryScreenTimeoutSupported() { return RecoveryScreenTimeoutAvailable(); }
 int RecoveryBrightness() {
   LoadAeraPreferencesIfAvailable();
   return DataManager::GetIntValue("tw_brightness_pct");
@@ -1926,6 +2226,22 @@ std::string RecoveryWallpaperPath() {
         return character < 32 || character == 127;
       });
   return valid ? path : std::string{};
+}
+LockTheme RecoveryLockTheme() {
+  LoadAeraPreferencesIfAvailable();
+  return DecodeLockTheme(DataManager::GetStrValue("aera_lock_theme"));
+}
+WallpaperLayout RecoveryWallpaperLayout() {
+  LoadAeraPreferencesIfAvailable();
+  return DecodeWallpaperLayout(DataManager::GetStrValue("aera_wallpaper_layout"));
+}
+bool RecoverySetWallpaperLayout(const WallpaperLayout &layout) {
+  return ValidWallpaperLayout(layout) &&
+      DataManager::SetValue("aera_wallpaper_layout", EncodeWallpaperLayout(layout), 1) == 0;
+}
+bool RecoverySetLockTheme(const LockTheme &theme) {
+  return ValidLockTheme(theme) &&
+      DataManager::SetValue("aera_lock_theme", EncodeLockTheme(theme), 1) == 0;
 }
 bool RecoverySetWallpaperPath(const std::string &path) {
   if (path.size() > 4096 ||
@@ -2118,7 +2434,106 @@ bool RecoverySetPcAutoEnable(bool enabled) {
   return false;
 }
 bool RecoveryResetThemeSettings() { return ResetAeraSettings(true); }
+bool RecoveryResetThemeSection(ThemeSection section) { return ResetAeraThemeSection(section); }
 bool RecoveryResetPreferences() { return ResetAeraSettings(false); }
+std::vector<kernel::Setting> RecoveryDeveloperSettings() {
+  LoadAeraPreferencesIfAvailable();
+  kernel::Overrides values;
+  if (kernel::Decode(DataManager::GetStrValue("aera_developer_settings"), &values))
+    gDeveloperSettings.Load(values);
+  return gDeveloperSettings.Discover();
+}
+bool RecoverySetDeveloperSetting(const std::string &id, const std::string &value,
+                                 bool remember, std::string *error) {
+  RecoveryDeveloperSettings();
+  if (value.empty()) {
+    if (!gDeveloperSettings.Reset(id, error)) return false;
+    remember = true;
+  } else {
+    if (!gDeveloperSettings.Apply(id, value, error)) return false;
+    if (remember) gDeveloperSettings.Remember(id, value);
+    else gDeveloperSettings.SessionOnly(id);
+  }
+  if (remember) {
+    DataManager::SetValue("aera_developer_settings", kernel::Encode(gDeveloperSettings.Saved()), 1);
+    if (!RecoveryAutoSavePreferences()) {
+      if (error) *error = "Applied for this session, but settings storage could not be saved.";
+      return false;
+    }
+  }
+  return true;
+}
+bool RecoveryResetDeveloperSettings(std::string *error) {
+  RecoveryDeveloperSettings();
+  const bool restored = gDeveloperSettings.ResetAll(error);
+  DataManager::SetValue("aera_developer_settings", kernel::Encode(gDeveloperSettings.Saved()), 1);
+  const bool saved = RecoveryAutoSavePreferences();
+  if (!saved && error) *error = "Settings storage could not be saved.";
+  return restored && saved;
+}
+void RecoverySkipDeveloperSettings() {
+  gDeveloperSettings.Skip();
+  const int fd = open("/tmp/aera-disable-developer-settings", O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd >= 0) close(fd);
+}
+bool RecoveryExportDeveloperSettings(std::string *path, std::string *error) {
+  const auto values = RecoveryDeveloperSettings();
+  const auto directory = TWFunc::get_log_dir();
+  if (!TWFunc::Recursive_Mkdir(directory, false)) {
+    if (error) *error = "Log storage is not available.";
+    return false;
+  }
+  std::ostringstream output;
+  utsname kernel{}; uname(&kernel);
+  output << "AERA developer settings\nDevice: " << RecoveryDevice()
+         << "\nKernel: " << kernel.release << "\n\n";
+  for (const auto &value : values)
+    output << value.device << " / " << value.name << "\nNode: " << value.path
+           << "\nActive: " << value.current << "\nInitial: " << value.baseline
+           << "\nSaved: " << value.saved << "\nStatus: " << value.status << "\n\n";
+  *path = directory + "/developer-settings.txt";
+  if (!WriteFileAtomically(*path, output.str())) {
+    if (error) *error = "Could not save the developer settings report.";
+    return false;
+  }
+  return true;
+}
+void RecoveryPollDeveloperSettings() {
+  using Clock = std::chrono::steady_clock;
+  static auto first = Clock::now(), last = first;
+  static bool started = false;
+  const auto now = Clock::now();
+  if (now - last < std::chrono::seconds(2)) return;
+  last = now;
+  if (access("/tmp/aera-disable-developer-settings", F_OK) == 0) gDeveloperSettings.Skip();
+  if (gDeveloperSettings.Skipped()) return;
+  LoadAeraPreferencesIfAvailable();
+  kernel::Overrides values;
+  if (!kernel::Decode(DataManager::GetStrValue("aera_developer_settings"), &values)) return;
+  gDeveloperSettings.Load(values);
+  if (gDeveloperSettings.Saved().empty()) return;
+  if (!started) {
+    // Query key state without consuming evdev events used by the UI. Holding
+    // Volume Down at startup bypasses saved tuning for this recovery session.
+    auto *dir = opendir("/dev/input");
+    if (dir) {
+      while (const auto *entry = readdir(dir)) {
+        if (strncmp(entry->d_name, "event", 5)) continue;
+        const int fd = open((std::string("/dev/input/") + entry->d_name).c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0) continue;
+        unsigned char keys[(KEY_MAX + 8) / 8]{};
+        if (ioctl(fd, EVIOCGKEY(sizeof(keys)), keys) >= 0 &&
+            (keys[KEY_VOLUMEDOWN / 8] & (1U << (KEY_VOLUMEDOWN % 8))))
+          RecoverySkipDeveloperSettings();
+        close(fd);
+      }
+      closedir(dir);
+    }
+    if (gDeveloperSettings.Skipped() || now - first < std::chrono::seconds(4)) return;
+    started = true;
+  }
+  gDeveloperSettings.Poll();
+}
 int RecoveryDefaultHapticDuration(Haptic haptic) {
   return DefaultHapticDuration(haptic);
 }
@@ -2165,6 +2580,12 @@ constexpr const char *kAeraPreferencesPath =
 constexpr const char *kNasProfilePath =
     "/data/media/0/AERA/network_storage.conf";
 
+#ifdef OF_ENABLE_WLAN
+bool gEarlyWifiInitialized = false;
+AeraSecrets::WlanSession gEarlyWifiDefaults;
+#endif
+bool gPrimaryWifiPreferencesLoaded = false;
+
 #ifdef OF_ALLOW_EARLY_SETTINGS_LOAD
 #ifdef OF_SETTINGS_ROOT_DIRECTORY
 constexpr const char* kAeraEarlyPreferencesRoot = OF_SETTINGS_ROOT_DIRECTORY;
@@ -2181,6 +2602,8 @@ std::string EarlyPreferencesDirectory() {
 const std::string kAeraEarlyPreferencesDirectory = EarlyPreferencesDirectory();
 const std::string kAeraEarlyPreferencesPath =
     kAeraEarlyPreferencesDirectory + "/early-ui.conf";
+const std::string kAeraEarlyWifiPath =
+    kAeraEarlyPreferencesDirectory + "/early-wifi.json";
 
 bool PrepareEarlyPreferencesRoot() {
   // Mount the backing recovery partition when the configured path belongs to
@@ -2192,10 +2615,13 @@ bool PrepareEarlyPreferencesRoot() {
 #endif
 
 struct EarlyUiPreferences {
+  std::string developer_settings = "1";
+  std::string wallpaper_layout;
+  std::string lock_theme;
   int clock24;
   std::string timezone;
   int brightness;
-  int screen_timeout;
+  int screen_timeout = 60;
   std::string accent;
   std::string theme;
   int surface_style;
@@ -2261,6 +2687,7 @@ bool ValidAccent(const std::string& value) {
 
 EarlyUiPreferences DefaultEarlyUiPreferences() {
   EarlyUiPreferences preferences{};
+  preferences.wallpaper_layout = EncodeWallpaperLayout({});
   preferences.clock24 = 0;
   preferences.timezone = DataManager::GetStrValue(TW_TIME_ZONE_VAR);
   if (!ValidPlainText(preferences.timezone, 96)) preferences.timezone = "UTC0";
@@ -2285,6 +2712,7 @@ EarlyUiPreferences DefaultEarlyUiPreferences() {
   preferences.dock_blur = 24;
   preferences.dock_hide_apps = 0;
   preferences.recents = 1;
+  preferences.lock_theme = EncodeLockTheme({});
 #ifdef TW_NO_HAPTICS
   preferences.haptic_touch = 0;
   preferences.haptic_keyboard = 0;
@@ -2310,6 +2738,9 @@ EarlyUiPreferences DefaultEarlyUiPreferences() {
 
 EarlyUiPreferences CaptureCurrentEarlyUiPreferences() {
   EarlyUiPreferences preferences{};
+  kernel::Overrides developer;
+  if (kernel::Decode(DataManager::GetStrValue("aera_developer_settings"), &developer))
+    preferences.developer_settings = kernel::Encode(developer);
   preferences.clock24 = DataManager::GetIntValue("tw_military_time") != 0 ? 1 : 0;
   preferences.timezone = DataManager::GetStrValue(TW_TIME_ZONE_VAR);
   if (!ValidPlainText(preferences.timezone, 96)) preferences.timezone = "UTC0";
@@ -2354,6 +2785,8 @@ EarlyUiPreferences CaptureCurrentEarlyUiPreferences() {
   preferences.dock_blur = dock_blur.empty() ? 24 : std::clamp(atoi(dock_blur.c_str()), 0, 100);
   preferences.dock_hide_apps = DataManager::GetIntValue("aera_dock_hide_apps") != 0 ? 1 : 0;
   preferences.recents = DataManager::GetIntValue("aera_recents_enabled") != 0 ? 1 : 0;
+  preferences.lock_theme = EncodeLockTheme(DecodeLockTheme(DataManager::GetStrValue("aera_lock_theme")));
+  preferences.wallpaper_layout = EncodeWallpaperLayout(DecodeWallpaperLayout(DataManager::GetStrValue("aera_wallpaper_layout")));
   preferences.haptic_touch = std::clamp(DataManager::GetIntValue("tw_button_vibrate"), 0, 300);
   preferences.haptic_keyboard = std::clamp(DataManager::GetIntValue("tw_keyboard_vibrate"), 0, 300);
   preferences.haptic_action = std::clamp(DataManager::GetIntValue("tw_action_vibrate"), 0, 500);
@@ -2405,31 +2838,44 @@ int DefaultHapticDuration(Haptic haptic) {
   return 0;
 }
 
-bool ResetAeraSettings(bool theme) {
+bool ResetAeraThemeSection(ThemeSection section) {
   LoadAeraPreferencesIfAvailable();
   const auto &defaults = gEarlyDefaults;
   bool restored = true;
   auto set = [&restored](const char *key, const auto &value) {
     restored &= DataManager::SetValue(key, value, 1) == 0;
   };
-  // Reset only the selected settings group; keep language, network and plugins.
-  if (theme) {
+  switch (section) {
+  case ThemeSection::kAppearance:
     set("aera_theme_accent", defaults.accent);
     set("aera_theme_mode", defaults.theme);
-    set("aera_wallpaper_path", std::string());
     set("aera_surface_style", defaults.surface_style);
+    break;
+  case ThemeSection::kWallpaper:
+    set("aera_wallpaper_path", std::string());
+    set("aera_wallpaper_layout", defaults.wallpaper_layout);
+    break;
+  case ThemeSection::kHome:
     set("aera_tinted_icon_backgrounds", defaults.tinted_icon_backgrounds);
     set("aera_themed_home_icons", defaults.themed_home_icons);
-    set("aera_interface_size", defaults.interface_size);
-    set("aera_keyboard_layout", defaults.keyboard_layout);
     set("aera_home_grid_columns", defaults.home_grid_columns);
+    break;
+  case ThemeSection::kTypography:
+    set("aera_interface_size", defaults.interface_size);
+    set("aera_ui_font", std::string());
+    break;
+  case ThemeSection::kNavigation:
     set("aera_dock_layout", defaults.dock_layout);
     set("aera_dock_transparency", defaults.dock_transparency);
     set("aera_dock_blur", defaults.dock_blur);
     set("aera_dock_hide_apps", defaults.dock_hide_apps);
-    set("aera_ui_font", std::string());
-  } else {
-    set("tw_military_time", defaults.clock24);
+    break;
+  case ThemeSection::kLock:
+    set("aera_lock_theme", defaults.lock_theme);
+    break;
+  case ThemeSection::kStatusBar:
+    set("aera_wifi_show_speed", defaults.wifi_show_speed);
+    set("aera_wifi_show_name", defaults.wifi_show_name);
     set("aera_battery_style", defaults.battery_style);
     set("aera_battery_circle_size", defaults.battery_circle_size);
     set("aera_battery_percentage", defaults.battery_percentage);
@@ -2447,6 +2893,27 @@ bool ResetAeraSettings(bool theme) {
     set("aera_temperature_battery_hot", defaults.temperature.battery_hot);
     set("aera_temperature_size", defaults.temperature.size);
     set("aera_temperature_position", defaults.temperature.position);
+    break;
+  }
+  return restored;
+}
+
+bool ResetAeraSettings(bool theme) {
+  LoadAeraPreferencesIfAvailable();
+  const auto &defaults = gEarlyDefaults;
+  bool restored = true;
+  auto set = [&restored](const char *key, const auto &value) {
+    restored &= DataManager::SetValue(key, value, 1) == 0;
+  };
+  // Theme resets include status indicators; preferences retain their own layout.
+  if (theme) {
+    for (auto section : {ThemeSection::kAppearance, ThemeSection::kWallpaper,
+         ThemeSection::kHome, ThemeSection::kTypography, ThemeSection::kNavigation,
+         ThemeSection::kStatusBar, ThemeSection::kLock})
+      restored &= ResetAeraThemeSection(section);
+  } else {
+    set("tw_military_time", defaults.clock24);
+    set("aera_keyboard_layout", defaults.keyboard_layout);
     set(TW_TIME_ZONE_VAR, defaults.timezone);
     set("aera_recents_enabled", defaults.recents);
     set("tw_hidden_files", 0);
@@ -2473,7 +2940,13 @@ bool SetEarlyUiValue(EarlyUiPreferences* preferences, const std::string& key,
                      const std::string& value, bool* recognized = nullptr) {
   if (recognized != nullptr) *recognized = true;
   int parsed = 0;
-  if (key == "clock24") {
+  if (key == "developer_settings") {
+    kernel::Overrides parsed;
+    if (!kernel::Decode(value, &parsed)) return false;
+    preferences->developer_settings = kernel::Encode(parsed);
+  } else if (key == "wallpaper_layout") {
+    preferences->wallpaper_layout = EncodeWallpaperLayout(DecodeWallpaperLayout(value));
+  } else if (key == "clock24") {
     if (!ParseInteger(value, 0, 1, &parsed)) return false;
     preferences->clock24 = parsed;
   } else if (key == "timezone") {
@@ -2530,6 +3003,8 @@ bool SetEarlyUiValue(EarlyUiPreferences* preferences, const std::string& key,
   } else if (key == "recents") {
     if (!ParseInteger(value, 0, 1, &parsed)) return false;
     preferences->recents = parsed;
+  } else if (key == "lock_theme") {
+    preferences->lock_theme = EncodeLockTheme(DecodeLockTheme(value));
   } else if (key == "haptic_touch") {
     if (!ParseInteger(value, 0, 300, &parsed)) return false;
     preferences->haptic_touch = parsed;
@@ -2616,6 +3091,8 @@ bool SetEarlyUiValue(EarlyUiPreferences* preferences, const std::string& key,
 }
 
 void ApplyEarlyUiPreferences(const EarlyUiPreferences& preferences) {
+  DataManager::SetValue("aera_developer_settings", preferences.developer_settings);
+  DataManager::SetValue("aera_wallpaper_layout", preferences.wallpaper_layout);
   DataManager::SetValue("tw_military_time", preferences.clock24);
   DataManager::SetValue(TW_TIME_ZONE_VAR, preferences.timezone);
   DataManager::SetValue("tw_brightness_pct", preferences.brightness);
@@ -2639,6 +3116,7 @@ void ApplyEarlyUiPreferences(const EarlyUiPreferences& preferences) {
   DataManager::SetValue("aera_dock_blur", preferences.dock_blur);
   DataManager::SetValue("aera_dock_hide_apps", preferences.dock_hide_apps);
   DataManager::SetValue("aera_recents_enabled", preferences.recents);
+  DataManager::SetValue("aera_lock_theme", preferences.lock_theme, 1);
   DataManager::SetValue("tw_button_vibrate", preferences.haptic_touch);
   DataManager::SetValue("tw_keyboard_vibrate", preferences.haptic_keyboard);
   DataManager::SetValue("tw_action_vibrate", preferences.haptic_action);
@@ -2708,17 +3186,20 @@ bool WriteFileAtomically(const std::string& path, const std::string& contents) {
     return false;
   }
   chmod(path.c_str(), 0600);
+  aera::shared_storage::Normalize(path);
   return true;
 }
 
 std::string SerializeEarlyUiPreferences(const EarlyUiPreferences& preferences) {
   std::ostringstream output;
   output << "schema=1\n"
+         << "developer_settings=" << preferences.developer_settings << '\n'
          << "clock24=" << preferences.clock24 << '\n'
          << "timezone=" << preferences.timezone << '\n'
          << "brightness=" << preferences.brightness << '\n'
          << "screen_timeout=" << preferences.screen_timeout << '\n'
          << "accent=" << preferences.accent << '\n'
+         << "wallpaper_layout=" << preferences.wallpaper_layout << '\n'
          << "theme=" << preferences.theme << '\n'
          << "surface_style=" << preferences.surface_style << '\n'
          << "tinted_icon_backgrounds="
@@ -2733,6 +3214,7 @@ std::string SerializeEarlyUiPreferences(const EarlyUiPreferences& preferences) {
          << "dock_blur=" << preferences.dock_blur << '\n'
          << "dock_hide_apps=" << preferences.dock_hide_apps << '\n'
          << "recents=" << preferences.recents << '\n'
+         << "lock_theme=" << preferences.lock_theme << '\n'
          << "haptic_touch=" << preferences.haptic_touch << '\n'
          << "haptic_keyboard=" << preferences.haptic_keyboard << '\n'
          << "haptic_action=" << preferences.haptic_action << '\n'
@@ -2771,6 +3253,20 @@ bool SaveEarlyUiPreferences() {
     return false;
   return WriteFileAtomically(kAeraEarlyPreferencesPath,
                              SerializeEarlyUiPreferences(CaptureCurrentEarlyUiPreferences()));
+#endif
+}
+
+bool SaveEarlyWifiPreferences() {
+#if defined(OF_ALLOW_EARLY_SETTINGS_LOAD) && defined(OF_ENABLE_WLAN)
+  if (!PrepareEarlyPreferencesRoot() ||
+      !TWFunc::Recursive_Mkdir(kAeraEarlyPreferencesDirectory, false)) return false;
+  AeraSecrets::WlanSession session;
+  session.auto_enable = DataManager::GetIntValue("of_wlan_auto_enable") == 1;
+  session.auto_connect = DataManager::GetIntValue("of_wlan_auto_connect") == 1;
+  session.last_ssid = DataManager::GetStrValue("of_wlan_last_ssid");
+  return AeraSecrets::SaveEarlyWlan(kAeraEarlyWifiPath, session);
+#else
+  return true;
 #endif
 }
 
@@ -2835,6 +3331,13 @@ void LoadAeraPreferencesIfAvailable() {
   CaptureEarlyDefaultsIfNeeded();
   LoadEarlyUiPreferencesIfAvailable();
   static bool loaded = false;
+  static std::atomic<bool> shared_repair_started{false};
+  struct stat shared_info{};
+  if (!shared_repair_started &&
+      lstat("/data/media/0/AERA", &shared_info) == 0 && S_ISDIR(shared_info.st_mode) &&
+      !shared_repair_started.exchange(true)) {
+    std::thread([] { aera::shared_storage::NormalizeAll(); }).detach();
+  }
   if (loaded) return;
   std::ifstream input(kAeraPreferencesPath);
   // Before decryption /data/media/0 is intentionally unavailable. Leave the
@@ -2867,6 +3370,8 @@ void LoadAeraPreferencesIfAvailable() {
     else if (key == "pc_auto_enable") DataManager::SetValue("aera_pc_auto_enable", value);
     else if (key == "update_nightly")
       DataManager::SetValue("aera_update_nightly", value);
+    else if (key == "appvault_storage" && ValidPlainText(value, 1024, true))
+      DataManager::SetValue("aera_appvault_storage", value);
     else if (key == "browser_homepage") DataManager::SetValue("aera_browser_homepage", value);
     else if (key == "browser_zoom") DataManager::SetValue("aera_browser_zoom", value);
     else if (key == "browser_cookies")
@@ -2880,8 +3385,14 @@ void LoadAeraPreferencesIfAvailable() {
   }
   ApplyEarlyUiPreferences(full_ui);
   loaded = true;
+  gPrimaryWifiPreferencesLoaded = true;
+#ifdef OF_ENABLE_WLAN
+  if (AeraSecrets::UsePrimaryWlan(DataManager::GetStrValue("wlan_connected_name")))
+    DataManager::SetValue("aera_wlan_reconnect", 1);
+#endif
   ApplyEarlyUiSideEffects();
   if (!SaveEarlyUiPreferences()) LOGERR("AERA: could not refresh the early UI preference cache.\n");
+  if (!SaveEarlyWifiPreferences()) LOGERR("AERA: could not refresh the early WLAN cache.\n");
   LOGINFO("AERA: restored preferences from shared storage.\n");
 }
 
@@ -2890,6 +3401,7 @@ bool SaveAeraPreferences(bool require_early) {
   if (!TWFunc::Recursive_Mkdir(directory, false)) return false;
   std::ostringstream output;
   output << "clock24=" << DataManager::GetIntValue("tw_military_time") << '\n'
+         << "developer_settings=" << CaptureCurrentEarlyUiPreferences().developer_settings << '\n'
          << "hidden=" << DataManager::GetIntValue("tw_hidden_files") << '\n'
          << "compression=" << DataManager::GetIntValue(TW_USE_COMPRESSION_VAR) << '\n'
          << "sha256=" << DataManager::GetIntValue(TW_USE_SHA2) << '\n'
@@ -2901,7 +3413,9 @@ bool SaveAeraPreferences(bool require_early) {
          << "plugin_auto_update=" << DataManager::GetIntValue("aera_plugin_auto_update") << '\n'
          << "pc_auto_enable=" << DataManager::GetIntValue("aera_pc_auto_enable") << '\n'
          << "update_nightly=" << DataManager::GetIntValue("aera_update_nightly") << '\n'
+         << "appvault_storage=" << DataManager::GetStrValue("aera_appvault_storage") << '\n'
          << "recents=" << DataManager::GetIntValue("aera_recents_enabled") << '\n'
+         << "lock_theme=" << EncodeLockTheme(RecoveryLockTheme()) << '\n'
          << "timezone=" << DataManager::GetStrValue(TW_TIME_ZONE_VAR) << '\n'
          << "brightness=" << DataManager::GetIntValue("tw_brightness_pct") << '\n'
          << "screen_timeout=" << RecoveryScreenTimeout() << '\n'
@@ -2928,6 +3442,7 @@ bool SaveAeraPreferences(bool require_early) {
          << "language=" << RecoveryLanguage() << '\n'
          << "ui_font=" << RecoveryUiFont() << '\n'
          << "wallpaper=" << RecoveryWallpaperPath() << '\n'
+         << "wallpaper_layout=" << EncodeWallpaperLayout(RecoveryWallpaperLayout()) << '\n'
          << "browser_homepage=" << RecoveryBrowserHomepage() << '\n'
          << "browser_zoom=" << RecoveryBrowserZoom() << '\n'
          << "browser_cookies="
@@ -2960,15 +3475,26 @@ bool SaveAeraPreferences(bool require_early) {
          << "temperature_position=" << temperature.position << '\n';
   if (!WriteFileAtomically(kAeraPreferencesPath, output.str())) return false;
   const bool early_saved = SaveEarlyUiPreferences();
+  if (!SaveEarlyWifiPreferences())
+    LOGERR("AERA: saved full preferences but could not update the early WLAN cache.\n");
   if (!early_saved)
     LOGERR("AERA: saved full preferences but could not update the early UI cache.\n");
   LOGINFO("AERA: saved preferences to shared storage.\n");
   return !require_early || early_saved;
 }
 
-bool LoadNasProfile(NasConfig *config) {
+bool LoadNasProfile(NasConfig *config, const std::string &protocol = "") {
   if (config == nullptr) return false;
-  std::ifstream input(kNasProfilePath);
+  if (!protocol.empty() && protocol != "smb" && protocol != "sftp") return false;
+  const auto path = protocol.empty() ? std::string(kNasProfilePath)
+      : std::string(kNasProfilePath) + "." + protocol;
+  std::ifstream input(path);
+  if (!input && !protocol.empty()) {
+    NasConfig legacy;
+    if (!LoadNasProfile(&legacy) || legacy.type != protocol) return false;
+    *config = std::move(legacy);
+    return true;
+  }
   if (!input) return false;
   std::string line;
   while (std::getline(input, line)) {
@@ -2985,15 +3511,37 @@ bool LoadNasProfile(NasConfig *config) {
     else if (key == "user") config->user = value;
     else if (key == "domain") config->domain = value;
     else if (key == "cache") config->cache_mode = value;
+    else if (key == "auth") config->auth = value;
+    else if (key == "key_name") config->key_name = value;
+    else if (key == "auto_connect") config->auto_connect = value == "1";
+    else if (key == "wifi_ssid") config->wifi_ssid = value;
   }
-  return !config->host.empty();
+  if (config->type != "smb" && config->type != "sftp") return false;
+  if (!protocol.empty() && config->type != protocol) return false;
+  if (protocol.empty()) {
+    // The legacy password belongs only to the profile recorded alongside it.
+    if (!AeraSecrets::MigrateNasPassword(config->type)) return false;
+  }
+  return true;
 }
 
 bool SaveNasProfile(const NasConfig &config) {
   constexpr const char *directory = "/data/media/0/AERA";
   // OrangeFox's Recursive_Mkdir returns 1 on success and 0 on failure.
   if (!TWFunc::Recursive_Mkdir(directory, false)) return false;
-  const std::string temporary = std::string(kNasProfilePath) + ".tmp";
+  NasConfig previous;
+  if (LoadNasProfile(&previous) && previous.type != config.type) {
+    const auto previous_path = std::string(kNasProfilePath) + "." + previous.type;
+    if (access(previous_path.c_str(), F_OK) != 0) {
+      std::ifstream legacy(kNasProfilePath);
+      std::ostringstream contents;
+      contents << legacy.rdbuf();
+      if (!legacy.good() || !WriteFileAtomically(previous_path, contents.str()))
+        return false;
+    }
+  }
+  const std::string profile = std::string(kNasProfilePath) + "." + config.type;
+  const std::string temporary = profile + ".tmp";
   std::ofstream output(temporary, std::ios::out | std::ios::trunc);
   if (!output) return false;
   output << "type=" << config.type << '\n'
@@ -3003,13 +3551,21 @@ bool SaveNasProfile(const NasConfig &config) {
          << "path=" << config.path << '\n'
          << "user=" << config.user << '\n'
          << "domain=" << config.domain << '\n'
-         << "cache=" << config.cache_mode << '\n';
+         << "cache=" << config.cache_mode << '\n'
+         << "auth=" << config.auth << '\n'
+         << "key_name=" << config.key_name << '\n'
+         << "auto_connect=" << (config.auto_connect ? 1 : 0) << '\n'
+         << "wifi_ssid=" << config.wifi_ssid << '\n';
   output.flush();
   if (!output) return false;
   output.close();
-  if (rename(temporary.c_str(), kNasProfilePath) != 0) return false;
-  chmod(kNasProfilePath, 0600);
-  return true;
+  if (rename(temporary.c_str(), profile.c_str()) != 0) return false;
+  chmod(profile.c_str(), 0600);
+  aera::shared_storage::Normalize(profile);
+  std::ifstream saved(profile);
+  std::ostringstream content;
+  content << saved.rdbuf();
+  return saved.good() && WriteFileAtomically(kNasProfilePath, content.str());
 }
 
 std::string ReadText(const std::string &path) {
@@ -3033,8 +3589,37 @@ std::vector<std::string> Lines(const std::string &text) {
 void RecoveryWifiInitialize() {
 #ifdef OF_ENABLE_WLAN
   LoadAeraPreferencesIfAvailable();
-  Wlan::Init();
+  AeraSecrets::UsePrimaryWlan();
+  if (gEarlyWifiInitialized && !gPrimaryWifiPreferencesLoaded) {
+    DataManager::SetValue("of_wlan_auto_enable", gEarlyWifiDefaults.auto_enable ? 1 : 0);
+    DataManager::SetValue("of_wlan_auto_connect", gEarlyWifiDefaults.auto_connect ? 1 : 0);
+    DataManager::SetValue("of_wlan_last_ssid", gEarlyWifiDefaults.last_ssid);
+  }
+  const bool early_initialized = gEarlyWifiInitialized;
+  gEarlyWifiInitialized = false;
+  if (early_initialized && DataManager::GetIntValue("of_wlan_auto_enable") != 1) {
+    AeraWifiDispatcher::Submit(AeraWifiDispatcher::Request::StopRadio);
+    return;
+  }
   AeraWifiDispatcher::Submit(AeraWifiDispatcher::Request::RestoreSession);
+#endif
+}
+
+void RecoveryWifiInitializeEarly() {
+#if defined(OF_ALLOW_EARLY_SETTINGS_LOAD) && defined(OF_ENABLE_WLAN)
+  if (gEarlyWifiInitialized || !RecoveryDataLocked() ||
+      !PrepareEarlyPreferencesRoot()) return;
+  AeraSecrets::WlanSession session;
+  if (!AeraSecrets::LoadEarlyWlan(kAeraEarlyWifiPath, session)) return;
+  gEarlyWifiDefaults.auto_enable = DataManager::GetIntValue("of_wlan_auto_enable") == 1;
+  gEarlyWifiDefaults.auto_connect = DataManager::GetIntValue("of_wlan_auto_connect") == 1;
+  gEarlyWifiDefaults.last_ssid = DataManager::GetStrValue("of_wlan_last_ssid");
+  DataManager::SetValue("of_wlan_auto_enable", session.auto_enable ? 1 : 0);
+  DataManager::SetValue("of_wlan_auto_connect", session.auto_connect ? 1 : 0);
+  DataManager::SetValue("of_wlan_last_ssid", session.last_ssid);
+  gEarlyWifiInitialized = true;
+  if (session.auto_enable)
+    AeraWifiDispatcher::Submit(AeraWifiDispatcher::Request::RestoreEarlySession);
 #endif
 }
 
@@ -3473,8 +4058,51 @@ bool RecoverySelectFastbootTransport(bool wireless) {
 #endif
 }
 
+std::vector<HomePluginPreference> RecoveryHomePluginLayout() {
+  if (RecoveryDataLocked()) return {};
+  constexpr const char *path = "/data/media/0/AERA/home_plugins.json";
+  struct stat info{};
+  if (lstat(path, &info) != 0 || !S_ISREG(info.st_mode) ||
+      info.st_size <= 0 || info.st_size > 65536) return {};
+  std::ifstream input(path);
+  Json::CharReaderBuilder reader;
+  Json::Value root;
+  std::string error;
+  if (!Json::parseFromStream(reader, input, &root, &error) ||
+      !root.isObject() || !root["schema"].isInt() || root["schema"].asInt() != 1 ||
+      !root["plugins"].isArray() || root["plugins"].size() > 512) return {};
+  std::vector<HomePluginPreference> result;
+  std::set<std::string> ids;
+  for (const auto &value : root["plugins"]) {
+    if (!value.isObject() || !value["id"].isString() || !value["size"].isInt()) return {};
+    HomePluginPreference item{value["id"].asString(), value["size"].asInt()};
+    if (!ValidHomePluginPreference(item) || !ids.insert(item.id).second) return {};
+    result.push_back(std::move(item));
+  }
+  return result;
+}
+
+bool RecoverySaveHomePluginLayout(const std::vector<HomePluginPreference> &layout) {
+  if (RecoveryDataLocked() || layout.size() > 512) return false;
+  Json::Value root(Json::objectValue);
+  root["schema"] = 1;
+  root["plugins"] = Json::Value(Json::arrayValue);
+  std::set<std::string> ids;
+  for (const auto &item : layout) {
+    if (!ValidHomePluginPreference(item) || !ids.insert(item.id).second) return false;
+    Json::Value value(Json::objectValue);
+    value["id"] = item.id; value["size"] = item.size;
+    root["plugins"].append(value);
+  }
+  if (!TWFunc::Recursive_Mkdir("/data/media/0/AERA", false)) return false;
+  Json::StreamWriterBuilder writer;
+  writer["indentation"] = "";
+  return WriteFileAtomically("/data/media/0/AERA/home_plugins.json", Json::writeString(writer, root));
+}
+
 NasStatus RecoveryNasStatus() {
   NasStatus status;
+  status.manual_disconnect = gNasManualDisconnect.load();
 #ifdef OF_ENABLE_WLAN
   status.supported = true;
   NasManager::RefreshStatus();
@@ -3491,6 +4119,10 @@ NasStatus RecoveryNasStatus() {
       DataManager::SetValue(TW_NAS_USER, remembered.user);
       DataManager::SetValue(TW_NAS_DOMAIN, remembered.domain);
       DataManager::SetValue(TW_NAS_CACHE_MODE, remembered.cache_mode);
+      DataManager::SetValue("aera_nas_auth", remembered.auth);
+      DataManager::SetValue("aera_nas_key_name", remembered.key_name);
+      DataManager::SetValue("aera_nas_auto_connect", remembered.auto_connect ? 1 : 0);
+      DataManager::SetValue("aera_nas_wifi_ssid", remembered.wifi_ssid);
     }
   }
   status.mounted = NasManager::IsMounted();
@@ -3507,7 +4139,7 @@ NasStatus RecoveryNasStatus() {
   status.config.password = DataManager::GetStrValue(TW_NAS_PASS);
   if (status.config.password.empty()) {
     std::string saved_password;
-    if (AeraSecrets::GetNasPassword(saved_password)) {
+    if (AeraSecrets::GetNasPassword(saved_password, status.config.type)) {
       status.config.password = saved_password;
       // NasManager consumes the session value; the persistent copy remains in
       // the encrypted secret store rather than the plain settings map.
@@ -3516,6 +4148,13 @@ NasStatus RecoveryNasStatus() {
   }
   status.config.domain = DataManager::GetStrValue(TW_NAS_DOMAIN);
   status.config.cache_mode = DataManager::GetStrValue(TW_NAS_CACHE_MODE);
+  status.config.auth = DataManager::GetStrValue("aera_nas_auth") == "key" ? "key" : "password";
+  status.config.key_name = DataManager::GetStrValue("aera_nas_key_name");
+  status.config.auto_connect = DataManager::GetIntValue("aera_nas_auto_connect") == 1;
+  status.config.wifi_ssid = DataManager::GetStrValue("aera_nas_wifi_ssid");
+  std::string private_key;
+  status.key_available = AeraSecrets::GetNasPrivateKey(private_key);
+  OPENSSL_cleanse(private_key.data(), private_key.size());
   if (status.config.type != "smb") status.config.type = "sftp";
   if (status.config.port.empty()) status.config.port = "22";
   if (status.config.share.empty()) status.config.share = "Backups";
@@ -3523,6 +4162,21 @@ NasStatus RecoveryNasStatus() {
   if (status.config.cache_mode != "data") status.config.cache_mode = "off";
 #endif
   return status;
+}
+
+NasConfig RecoverySavedNasConfig(const std::string &protocol) {
+  NasConfig config;
+  config.type = protocol == "smb" ? "smb" : "sftp";
+  config.port = config.type == "smb" ? "445" : "22";
+  config.share = "Backups";
+  config.domain = "WORKGROUP";
+  config.cache_mode = "off";
+  config.auth = "password";
+#ifdef OF_ENABLE_WLAN
+  LoadNasProfile(&config, config.type);
+  AeraSecrets::GetNasPassword(config.password, config.type);
+#endif
+  return config;
 }
 
 bool RecoverySetNasConfig(const NasConfig &config, std::string *error) {
@@ -3538,9 +4192,10 @@ bool RecoverySetNasConfig(const NasConfig &config, std::string *error) {
     if (error) *error = "Choose either SFTP or SMB.";
     return false;
   }
-  if (invalid(config.host, 128) || invalid(config.user, 128) ||
+  if ((config.auth != "password" && config.auth != "key") || invalid(config.key_name, 128) ||
+      invalid(config.host, 128) || invalid(config.user, 128) ||
       invalid(config.password, 254) || invalid(config.share, 128) ||
-      invalid(config.path, 256) || invalid(config.domain, 128)) {
+      invalid(config.path, 256) || invalid(config.domain, 128) || invalid(config.wifi_ssid, 32)) {
     if (error) *error = "A field is too long or contains a line break.";
     return false;
   }
@@ -3570,17 +4225,43 @@ bool RecoverySetNasConfig(const NasConfig &config, std::string *error) {
   saved &= DataManager::SetValue(TW_NAS_USER, config.user) == 0;
   saved &= DataManager::SetValue(TW_NAS_DOMAIN, config.domain) == 0;
   saved &= DataManager::SetValue(TW_NAS_CACHE_MODE, config.cache_mode) == 0;
+  saved &= DataManager::SetValue("aera_nas_auth", config.auth) == 0;
+  saved &= DataManager::SetValue("aera_nas_key_name", config.key_name) == 0;
+  saved &= DataManager::SetValue("aera_nas_auto_connect", config.auto_connect ? 1 : 0) == 0;
+  saved &= DataManager::SetValue("aera_nas_wifi_ssid", config.wifi_ssid) == 0;
   // Keep the live value for NasManager, but never mark it persistent here.
   saved &= DataManager::SetValue(TW_NAS_PASS, config.password) == 0;
   const bool secret_saved = config.password.empty()
-      ? AeraSecrets::ClearNasPassword()
-      : AeraSecrets::SetNasPassword(config.password);
+      ? AeraSecrets::ClearNasPassword(config.type)
+      : AeraSecrets::SetNasPassword(config.password, config.type);
   if (!secret_saved) {
     if (error) *error = "Could not save the password to AERA's encrypted credential store.";
     return false;
   }
   if (!saved || !SaveNasProfile(config)) {
     if (error) *error = "Could not write the connection settings to recovery storage.";
+    return false;
+  }
+  return true;
+#endif
+}
+
+bool RecoveryImportNasKey(const std::string &key, const std::string &name,
+                          std::string *error) {
+#ifndef OF_ENABLE_WLAN
+  (void)key;
+  (void)name;
+  if (error) *error = "This recovery was built without network storage support.";
+  return false;
+#else
+  if (key.empty() || key.size() > 65536 || key.find('\0') != std::string::npos ||
+      name.empty() || name.size() > 128 || name.find_first_of("\r\n/") != std::string::npos ||
+      key.find("-----BEGIN ") != 0 || key.find("PRIVATE KEY-----") == std::string::npos) {
+    if (error) *error = "Select an OpenSSH or PEM private key, not a public key or PuTTY PPK file.";
+    return false;
+  }
+  if (!AeraSecrets::SetNasPrivateKey(key)) {
+    if (error) *error = "Could not save the private key to AERA's encrypted credential store.";
     return false;
   }
   return true;
@@ -3597,11 +4278,15 @@ int RecoveryRunNas(const NasRequest &request) {
     case NasOperation::kMountAndUse:
       result = NasManager::Mount() && NasManager::SelectAsStorage();
       break;
+    case NasOperation::kMount:
+      result = NasManager::Mount();
+      break;
     case NasOperation::kUse:
       result = NasManager::SelectAsStorage();
       break;
     case NasOperation::kUnmount:
       result = NasManager::Unmount();
+      if (result) ++gNasManualDisconnect;
       break;
   }
   NasManager::RefreshStatus();

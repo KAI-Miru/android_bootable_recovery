@@ -42,7 +42,7 @@ class ChineseCatalogTests(unittest.TestCase):
                     if not re.search('[A-Za-z]', tag) or tag in literal_values:
                         continue
                     with self.subTest(path=str(path.relative_to(ROOT)), tag=tag):
-                        self.assertIn(tag, self.rows)
+                        self.assertTrue(tag in self.rows, f"Missing catalog entry: {tag}")
         for tag in ('Backup', 'Backups', 'Bootloader', 'Wipe', 'Root Manager',
                     'Plugin Manager', 'Slot %s', 'Theme Engine', 'Recovery Update'):
             for locale in ('zh_CN', 'zh_TW'):

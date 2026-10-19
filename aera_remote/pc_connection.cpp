@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "pc_connection.hpp"
+#include "../aera_shared_storage.hpp"
 #include "pc_storage.hpp"
 #include "backup_cancel.hpp"
 #include "pc_terminal.hpp"
+#include "../aera_flash_log.hpp"
 #include "../aeraui/features/backup/app_vault.hpp"
 
 #ifdef OF_ENABLE_WLAN
@@ -211,6 +213,7 @@ bool MakeDirectories(const std::string &path) {
       return false;
     }
   }
+  aera::shared_storage::Normalize(path);
   return true;
 }
 bool WriteAll(int fd, const char *bytes, size_t size) {
@@ -229,6 +232,7 @@ bool AtomicFile(const std::string &path, const std::string &text) {
   bool ok = fchmod(fd, 0600) == 0 && WriteAll(fd, text.data(), text.size()) && fsync(fd) == 0;
   if (close(fd) != 0) ok = false;
   if (!ok || rename(temporary.c_str(), path.c_str()) != 0) { unlink(temporary.c_str()); return false; }
+  aera::shared_storage::Normalize(path);
   return true;
 }
 void RemoveTransferFiles(const Transfer &transfer) {
@@ -714,6 +718,7 @@ Json::Value TransferStatus() {
   state["save_path"] = g_transfer.save_path;
   state["source_path"] = g_transfer.existing_file ? g_transfer.path : "";
   state["root_action"] = g_transfer.request.root_action;
+  state["nas_action"] = g_transfer.request.nas_action;
   state["root_provider"] = g_transfer.request.root_provider;
   state["root_slot"] = g_transfer.request.root_slot;
   state["root_inspection"] = g_transfer.root_inspection;
@@ -1043,7 +1048,7 @@ void QueueBackup(SSL *tls, const Json::Value &body, const std::string &owner) {
   if ((job.backup_kind != "recovery" && job.backup_kind != "apps") ||
       (job.backup_source != "computer" && job.backup_source != "device") ||
       (job.backup_action != "backup" && job.backup_action != "restore" && job.backup_action != "inspect" &&
-       job.backup_action != "apps" && job.backup_action != "snapshots")) {
+       job.backup_action != "apps" && job.backup_action != "snapshots" && job.backup_action != "storage")) {
     Error(tls, 400, "Unknown backup operation."); return;
   }
   if (body.get("confirm", false) != true) { Error(tls, 400, "Confirm the backup operation."); return; }
@@ -1077,18 +1082,24 @@ void QueueBackup(SSL *tls, const Json::Value &body, const std::string &owner) {
   if ((job.backup_action == "backup" || job.backup_action == "restore") && job.partitions.empty()) {
     Error(tls, 400, "Select at least one app or partition."); return;
   }
-  std::string storage_root;
   if (!computer || (job.backup_action == "restore" && job.backup_method == "transfer")) {
     const auto selected = body.get("storage", "").asString();
-    if (!ResolveStoragePath(selected, &job.backup_storage, &storage_root) || job.backup_storage != storage_root) {
+    bool offered = false;
+    {
+      std::lock_guard<std::mutex> guard(g_lock);
+      for (const auto &storage : g_platform["backup_storages"])
+        if (storage["path"].asString() == selected) offered = true;
+    }
+    if (!offered) {
       Error(tls, 409, "Select mounted device storage."); return;
     }
+    job.backup_storage = selected;
   }
   if (computer) {
     if (job.backup_action != "apps" && !body.get("folder_ready", false).asBool()) { Error(tls, 400, "Choose a computer folder first."); return; }
     job.path = std::string(storage::kMount) +
         (job.backup_kind == "apps" && job.backup_action == "backup" ? "/AERA/AppBackupVault" : "");
-  } else if (job.backup_action == "backup" || job.backup_action == "apps") {
+  } else if (job.backup_action == "backup" || job.backup_action == "apps" || job.backup_action == "storage") {
     job.path = job.backup_storage + (job.backup_kind == "apps" ? "/AERA/AppBackupVault" : "");
   } else if (!ResolveStoragePath(body.get("path", "").asString(), &job.path) || job.path.size() > 220) {
     Error(tls, 409, "Select an existing backup folder on mounted storage."); return;
@@ -1122,6 +1133,72 @@ void QueueBackup(SSL *tls, const Json::Value &body, const std::string &owner) {
   Reply(tls, 200, JsonText(result));
 }
 
+void QueueNetworkStorage(SSL *tls, const Json::Value &body, const std::string &owner) {
+  if (!body["action"].isString()) {
+    Error(tls, 400, "Select a network storage operation."); return;
+  }
+  aeraui::JobRequest job;
+  job.job = aeraui::Job::kNetworkStorage;
+  job.nas_action = body.get("action", "").asString();
+  if (job.nas_action != "save" && job.nas_action != "connect" && job.nas_action != "disconnect") {
+    Error(tls, 400, "Select a network storage operation."); return;
+  }
+  auto &config = job.nas_config;
+  for (const auto &field : body.getMemberNames()) {
+    if (!body[field].isString() || body[field].asString().find('\0') != std::string::npos) {
+      Error(tls, 400, "Invalid network storage setting."); return;
+    }
+  }
+  config.type = body.get("type", "sftp").asString();
+  config.host = body.get("host", "").asString();
+  config.port = body.get("port", "22").asString();
+  config.user = body.get("user", "").asString();
+  config.password = body.get("password", "").asString();
+  config.share = body.get("share", "Backups").asString();
+  config.path = body.get("path", "").asString();
+  config.domain = body.get("domain", "WORKGROUP").asString();
+  config.cache_mode = body.get("cache_mode", "off").asString();
+  config.auth = body.get("auth", "password").asString();
+  config.key_name = body.get("key_name", "").asString();
+  job.nas_private_key = body.get("private_key", "").asString();
+  job.nas_password_update = body.isMember("password");
+  job.title = "Network storage";
+  job.show_on_device = false; job.present_before_run = true;
+  Json::Value result;
+  {
+    std::lock_guard<std::mutex> guard(g_lock);
+    if (g_recovery_busy || g_file_busy || !TerminalPhase(g_transfer.phase) ||
+        !g_reboot_target.empty() || !g_platform["nas"]["supported"].asBool() ||
+        g_platform["locked"].asBool()) {
+      Error(tls, 409, "Network storage is unavailable or recovery is busy."); return;
+    }
+    const auto id = RandomToken();
+    if (id.empty()) { Error(tls, 500, "Could not prepare network storage."); return; }
+    RemoveTransferFiles(g_transfer); g_transfer = Transfer{};
+    g_transfer.id = id; g_transfer.owner = owner;
+    g_transfer.computer = g_trusted.get(owner, "Computer").asString();
+    g_transfer.name = job.title; g_transfer.request = std::move(job);
+    g_transfer.phase = "queued"; g_transfer.detail = "Updating network storage";
+    g_prompt = Json::Value(Json::objectValue); g_presentation = Json::Value(Json::objectValue);
+    result = TransferStatus();
+  }
+  Reply(tls, 200, JsonText(result));
+}
+
+void SendDownload(SSL *tls, int fd, uint64_t bytes, const std::string &name) {
+  const auto header = "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: " +
+      std::to_string(bytes) + "\r\nContent-Disposition: attachment; filename=\"" + name +
+      "\"\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
+  bool okay = TlsWrite(tls, header.data(), header.size());
+  std::array<char, 65536> buffer{};
+  while (okay && bytes) {
+    const auto count = read(fd, buffer.data(), std::min<uint64_t>(buffer.size(), bytes));
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) break;
+    okay = TlsWrite(tls, buffer.data(), count); bytes -= count;
+  }
+  close(fd);
+}
 void DownloadFile(SSL *tls, const std::string &ticket) {
   FileAccess access;
   if (!access.acquired) { Error(tls, 409, "Recovery is busy."); return; }
@@ -1262,6 +1339,11 @@ void PrepareTransfer(SSL *tls, const Json::Value &body, const std::string &owner
     if (!TerminalPhase(g_transfer.phase)) { Error(tls, 409, "Another transfer or installation is active."); return; }
     if (g_recovery_busy || g_file_busy || !g_reboot_target.empty()) { Error(tls, 409, "Recovery is busy."); return; }
     const std::string root = body["storage"].asString();
+    if (body["kind"] != "file" &&
+        (g_platform["locked"].asBool() || !g_platform["transfer_storage"].isObject() ||
+         root != g_platform["transfer_storage"]["path"].asString())) {
+      Error(tls, 409, "Installation transfers require available, unlocked internal storage."); return;
+    }
     bool storage_available = false;
     for (const auto &storage : g_platform["storages"])
       storage_available |= storage["path"].asString() == root;
@@ -1592,6 +1674,7 @@ void FetchTransfer(Transfer transfer, const std::string &url, unsigned generatio
   if (failure.empty() && !current()) failure = "Download cancelled. No installation was started.";
   if (failure.empty() && rename(partial.c_str(), transfer.path.c_str()) != 0)
     failure = "Could not finalize the downloaded file.";
+  if (failure.empty()) aera::shared_storage::Normalize(transfer.path);
   Json::Value package_info(Json::objectValue);
   if (failure.empty() && !image) package_info = InspectPackage(transfer);
   {
@@ -1682,6 +1765,7 @@ void Upload(SSL *tls, const HttpRequest &request, const std::string &owner, unsi
     if (g_transfer.cancel_requested) failure = "Transfer cancelled. No installation was started.";
     if (failure.empty() && rename(partial.c_str(), transfer.path.c_str()) != 0)
       failure = "Could not finalize the transferred file.";
+    if (failure.empty()) aera::shared_storage::Normalize(transfer.path);
     if (failure.empty() && transfer.save_path.empty() && transfer.request.job == aeraui::Job::kInstall)
       g_transfer.detail = "Reading package information...";
   }
@@ -1835,6 +1919,30 @@ void Handle(SSL *tls, unsigned generation) {
   if (request.method == "GET" && (request.path == "/api/log/logcat" || request.path == "/api/log/kernel")) {
     DiagnosticLog(tls, request.path == "/api/log/kernel"); return;
   }
+  if (request.method == "GET" && request.path == "/api/log/flashes") {
+    FileAccess access;
+    if (!access.acquired) { Error(tls, 409, "Recovery is busy."); return; }
+    Json::Value result(Json::objectValue); result["reports"] = Json::Value(Json::arrayValue);
+    for (const auto &report : aera::flashlog::Reports()) {
+      Json::Value entry;
+      entry["name"] = report.name; entry["bytes"] = Json::UInt64(report.bytes);
+      entry["timestamp"] = Json::Int64(report.timestamp);
+      entry["result"] = report.name.find("_SUCCESS.zip") != std::string::npos ? "Success" :
+          report.name.find("_FAILED.zip") != std::string::npos ? "Failed" : "Incomplete";
+      result["reports"].append(entry);
+    }
+    Reply(tls, 200, JsonText(result)); return;
+  }
+  if (request.method == "GET" && request.path.compare(0, 15, "/api/log/flash/") == 0) {
+    FileAccess access;
+    if (!access.acquired) { Error(tls, 409, "Recovery is busy."); return; }
+    uint64_t bytes = 0;
+    const auto name = request.path.substr(15);
+    const int fd = aera::flashlog::OpenReport(name, &bytes);
+    if (fd < 0) Error(tls, 404, "Flash report is no longer available.");
+    else SendDownload(tls, fd, bytes, name);
+    return;
+  }
   if (request.method == "GET" && request.path == "/api/status") {
     keep_connection = request.length == 0;
     Json::Value state;
@@ -1854,12 +1962,13 @@ void Handle(SSL *tls, unsigned generation) {
   }
   Json::Value body;
   if (request.method != "POST" || !ReadJsonBody(tls, request, &body,
-        request.path == "/api/backups" ? 65536 : kMaximumJson)) {
+        request.path == "/api/nas" ? 98304 : request.path == "/api/backups" ? 65536 : kMaximumJson)) {
     Error(tls, 400, "Invalid command."); return;
   }
   if (request.path == "/api/prepare") { PrepareTransfer(tls, body, owner); return; }
   if (request.path == "/api/download") { PrepareTransfer(tls, body, owner, true); return; }
   if (request.path == "/api/backups") { QueueBackup(tls, body, owner); return; }
+  if (request.path == "/api/nas") { QueueNetworkStorage(tls, body, owner); return; }
   if (request.path == "/api/backups/heartbeat") {
     if (!body["id"].isString()) { Error(tls, 400, "Missing backup operation ID."); return; }
     std::lock_guard<std::mutex> guard(g_lock);
@@ -2427,6 +2536,36 @@ void RefreshPlatformInfo() {
   Json::Value info;
   info["terminal_available"] = terminal::Available();
   info["app_vault_available"] = aeraui::AppVaultInstalled();
+  const auto nas = aeraui::RecoveryNasStatus();
+  auto &network = info["nas"];
+  network["supported"] = nas.supported; network["mounted"] = nas.mounted;
+  network["status"] = nas.status; network["error"] = nas.error;
+  network["type"] = nas.config.type; network["host"] = nas.config.host;
+  network["port"] = nas.config.port; network["user"] = nas.config.user;
+  network["share"] = nas.config.share; network["path"] = nas.config.path;
+  network["domain"] = nas.config.domain; network["cache_mode"] = nas.config.cache_mode;
+  network["auth"] = nas.config.auth; network["key_name"] = nas.config.key_name;
+  network["key_available"] = nas.key_available;
+  network["password_saved"] = !nas.config.password.empty();
+  for (const auto *protocol : {"smb", "sftp"}) {
+    const auto profile = aeraui::RecoverySavedNasConfig(protocol);
+    auto &item = network["profiles"][protocol];
+    item["type"] = profile.type; item["host"] = profile.host;
+    item["port"] = profile.port; item["user"] = profile.user;
+    item["share"] = profile.share; item["path"] = profile.path;
+    item["domain"] = profile.domain; item["cache_mode"] = profile.cache_mode;
+    item["auth"] = profile.auth; item["key_name"] = profile.key_name;
+    item["password_saved"] = !profile.password.empty();
+    item["key_available"] = nas.key_available;
+  }
+  info["app_vault_storage"] = aeraui::RecoveryAppVaultStorage();
+  info["backup_storages"] = Json::Value(Json::arrayValue);
+  for (const auto &target : aeraui::RecoveryBackupStorages()) {
+    Json::Value item;
+    item["name"] = target.name; item["path"] = target.path;
+    item["mounted"] = target.mounted; item["free"] = Json::UInt64(target.free_bytes);
+    info["backup_storages"].append(item);
+  }
   info["backup_block_bytes"] = Json::UInt64(storage::kBlock);
   info["backup_partitions"] = Json::Value(Json::arrayValue);
   for (const auto &volume : aeraui::RecoveryVolumes("backup")) {
@@ -2463,6 +2602,9 @@ void RefreshPlatformInfo() {
   info["storages"] = Json::Value(Json::arrayValue);
   std::set<std::string> roots;
   auto add_storage = [&](const std::string &name, const std::string &path) {
+#ifndef AERA_PC_HOST_TEST
+    if (!aeraui::RecoveryBackupPathReady(path)) return;
+#endif
     char canonical[4096]; struct statvfs filesystem{}; struct statfs type{};
     if (!realpath(path.c_str(), canonical) || !strcmp(canonical, "/") ||
         statvfs(canonical, &filesystem) != 0 || (filesystem.f_flag & ST_RDONLY) ||
@@ -2472,9 +2614,23 @@ void RefreshPlatformInfo() {
     storage["free"] = Json::UInt64(uint64_t(filesystem.f_bavail) * filesystem.f_frsize);
     info["storages"].append(storage);
   };
-  if (!aeraui::RecoveryDataLocked()) add_storage("Current storage", aeraui::RecoveryStorage());
+  info["transfer_storage"] = Json::Value();
+  if (!aeraui::RecoveryDataLocked()) {
+    const auto internal = aeraui::RecoveryInternalStorage();
+    if (!internal.empty()) {
+      add_storage("Internal storage", internal);
+      char canonical[4096];
+      if (realpath(internal.c_str(), canonical)) {
+        for (const auto &storage : info["storages"])
+          if (storage["path"].asString() == canonical) info["transfer_storage"] = storage;
+      }
+    }
+  }
   for (const auto &volume : aeraui::RecoveryVolumes("storage")) {
     if (aeraui::RecoveryDataLocked() && (volume.path == "/data" || volume.path == "/sdcard")) continue;
+#ifndef AERA_PC_HOST_TEST
+    if (!aeraui::RecoveryBackupPathReady(volume.path)) continue;
+#endif
     add_storage(volume.name, volume.path);
   }
   info["partitions"] = Json::Value(Json::arrayValue);
@@ -2546,6 +2702,10 @@ bool TakeInstallRequest(InstallRequest *request) {
   std::lock_guard<std::mutex> guard(g_lock);
   if (!request || g_transfer.phase != "queued" || g_transfer.shown || g_file_busy || g_recovery_busy) return false;
   *request = {g_transfer.id, g_transfer.name, g_transfer.computer, g_transfer.bytes, g_transfer.request};
+  if (g_transfer.request.job == aeraui::Job::kNetworkStorage) {
+    g_transfer.request.nas_private_key.clear();
+    g_transfer.request.nas_config.password.clear();
+  }
   g_transfer.shown = true; return true;
 }
 bool BeginInstall(const std::string &id) {
@@ -2553,6 +2713,7 @@ bool BeginInstall(const std::string &id) {
   if (g_transfer.id != id || g_transfer.phase != "queued") return false;
   struct stat info{};
   if (g_transfer.request.job != aeraui::Job::kRootOperation &&
+      g_transfer.request.job != aeraui::Job::kNetworkStorage &&
       g_transfer.request.job != aeraui::Job::kPcBackupOperation &&
       (lstat(g_transfer.path.c_str(), &info) != 0 || !S_ISREG(info.st_mode) ||
       static_cast<uint64_t>(info.st_size) != g_transfer.bytes)) {
@@ -2607,7 +2768,7 @@ void UpdateBackupResult(const Json::Value &result) {
   if (g_transfer.phase == "installing" && g_transfer.request.job == aeraui::Job::kPcBackupOperation)
     g_transfer.backup_result = result;
 }
-bool BackupOperationActive() { return g_backup_active.load(); }
+bool BackupOperationActive() { return g_backup_active.load() || backup::Operations().Active(); }
 BackupTransferStatistics GetBackupTransferStatistics() {
   std::lock_guard<std::mutex> guard(g_lock);
   if (g_transfer.request.job != aeraui::Job::kPcBackupOperation ||
@@ -2616,7 +2777,9 @@ BackupTransferStatistics GetBackupTransferStatistics() {
   const auto statistics = storage::Channel().Statistics();
   return {statistics.bytes, statistics.bytes_per_second, statistics.finalizing, statistics.waiting_seconds};
 }
-bool BackupCancelRequested() { return g_backup_active.load() && g_backup_cancel.load(); }
+bool BackupCancelRequested() {
+  return (g_backup_active.load() && g_backup_cancel.load()) || backup::Operations().Requested();
+}
 BackupCancellation GetBackupCancellation() {
   std::lock_guard<std::mutex> guard(g_lock);
   BackupCancellation result;
@@ -2634,6 +2797,9 @@ bool CancelBackup(const std::string &id, bool acknowledge_partial_restore) {
       (g_transfer.phase != "queued" && g_transfer.phase != "installing") ||
       (g_transfer.request.backup_action != "backup" && g_transfer.request.backup_action != "restore") ||
       (g_transfer.request.backup_action == "restore" && !acknowledge_partial_restore)) return false;
+  const auto operation = backup::Operations().Snapshot();
+  if (operation.active) backup::Operations().Request(operation.token, acknowledge_partial_restore);
+  aeraui::RecoveryCancelNasWrites();
   g_transfer.cancel_requested = true; g_backup_cancel.store(true);
   g_transfer.detail = "Cancellation requested. Waiting for the worker to stop.";
   storage::Channel().Stop();
@@ -2660,11 +2826,16 @@ void CompleteInstall(const std::string &id, int result) {
   if (result == 0) { g_transfer.progress = 100;
     if (g_transfer.request.job == aeraui::Job::kPcBackupOperation)
       g_transfer.detail = g_transfer.backup_result.get("detail", "Backup operation completed.").asString();
+    else if (g_transfer.request.job == aeraui::Job::kNetworkStorage)
+      g_transfer.detail = g_transfer.request.nas_action == "save" ? "Network storage settings saved." :
+          g_transfer.request.nas_action == "disconnect" ? "Network storage disconnected." : "Network storage connected.";
     else if (g_transfer.request.job != aeraui::Job::kRootOperation) g_transfer.detail = "Installation completed.";
   } else if (g_transfer.cancel_requested) {
     // Preserve the explicit cancellation warning above.
   } else if (g_transfer.request.job == aeraui::Job::kPcBackupOperation)
     g_transfer.detail = g_transfer.backup_result.get("error", "Backup operation failed; review the recovery log.").asString();
+  else if (g_transfer.request.job == aeraui::Job::kNetworkStorage)
+    g_transfer.detail = "Network storage operation failed. Check the connection settings and network storage status.";
   else if (g_transfer.request.job != aeraui::Job::kRootOperation)
     g_transfer.detail = "Installation failed. Review the installer log.";
   g_prompt = Json::Value(Json::objectValue); g_prompt_answer_id.clear();
@@ -2744,9 +2915,9 @@ void UpdateInstall(int, const std::string &, const std::string &) {}
 void CompleteInstall(const std::string &, int) {}
 void UpdateRootInspection(const aeraui::root::Progress &) {}
 void UpdateBackupResult(const Json::Value &) {}
-bool BackupOperationActive() { return false; }
+bool BackupOperationActive() { return backup::Operations().Active(); }
 BackupTransferStatistics GetBackupTransferStatistics() { return {}; }
-bool BackupCancelRequested() { return false; }
+bool BackupCancelRequested() { return backup::Operations().Requested(); }
 BackupCancellation GetBackupCancellation() { return {}; }
 bool CancelBackup(const std::string &, bool) { return false; }
 void UpdateInstallerPrompt(const aeraui::InstallerPrompt &) {}

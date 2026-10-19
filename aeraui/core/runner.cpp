@@ -4,6 +4,7 @@
  */
 
 #include "aeraui/runner.hpp"
+#include "../../aera_shared_storage.hpp"
 #include "operation_affinity.hpp"
 
 #include <linux/input.h>
@@ -27,6 +28,7 @@
 
 #include "aeraui/engine.hpp"
 #include "aeraui/backend.hpp"
+#include "aeraui/lock_theme.hpp"
 #include "aeraui/platform/aera_screen_timer.hpp"
 #include "../../aera_remote/pc_connection.hpp"
 #include "aeraui/status_bar.hpp"
@@ -248,6 +250,7 @@ void CaptureHardwareScreenshot(Engine& engine) {
                      ? gr_save_screenshot_rotated(path.c_str(), 270)
                      : gr_save_screenshot(path.c_str())) == 0;
         if (saved) {
+            aera::shared_storage::Normalize(path);
             __android_log_print(ANDROID_LOG_INFO, kLogTag,
                                 "hardware screenshot saved to %s", path.c_str());
         }
@@ -339,7 +342,10 @@ bool HandleEvent(Engine& engine, InteractionBoost& performance,
         } else if (event.value == 0) {
             if (!hardware.screen_off && !hardware.woke_on_power &&
                 !hardware.power_long_press && !hardware.screenshot_chord) {
-                engine.SetSuspended(true);
+                const bool ambient=RecoveryLockTheme().aod;
+                aeraScreenTimer.SetAmbientEnabled(ambient,RecoveryLockTheme().aod_brightness);
+                if(ambient){engine.ShowLockScreen(true);engine.RunFrame();}
+                engine.SetSuspended(!ambient);
                 aeraScreenTimer.Blank();
                 hardware.screen_off = true;
                 __android_log_print(ANDROID_LOG_INFO, kLogTag,
@@ -389,9 +395,12 @@ bool HandleEvent(Engine& engine, InteractionBoost& performance,
 
 void CheckScreenTimeout(Engine& engine, HardwareState& hardware) {
     if (hardware.screen_off || hardware.power_down) return;
+    const auto theme = RecoveryLockTheme();
+    aeraScreenTimer.SetAmbientEnabled(theme.aod, theme.aod_brightness);
     aeraScreenTimer.CheckTimeout();
     if (aeraScreenTimer.IsScreenOff()) {
-        engine.SetSuspended(true);
+        if (theme.aod) engine.ShowLockScreen(true);
+        engine.SetSuspended(!theme.aod);
         hardware.screen_off = true;
         __android_log_print(ANDROID_LOG_INFO, kLogTag,
                             "display suspended after inactivity");
@@ -505,6 +514,7 @@ RunResult RunLoop(bool fastboot_mode = false,
                 gFileBasedEncryption.load(std::memory_order_acquire),
                 gCryptoUserId.load(std::memory_order_acquire),
                 gPatternGridSize.load(std::memory_order_acquire));
+            RecoveryWifiInitializeEarly();
             decrypt_request_sent = true;
             __android_log_print(ANDROID_LOG_INFO, kLogTag,
                                 "native decrypt page shown at stock startup gate");
@@ -542,21 +552,22 @@ RunResult RunLoop(bool fastboot_mode = false,
                                     toward_fastboot ? "fastboot" : "recovery");
             }
         }
-        if (hardware.screen_off && aera::pc::NeedsUiAttention()) {
-            engine.ShowLockScreen();
-            engine.SetSuspended(false);
-            engine.RunFrame();
+        if (hardware.screen_off && (engine.NeedsWake() || aera::pc::NeedsUiAttention())) {
+            if (!engine.WakeForOperation()) {
+                engine.ShowLockScreen();
+                engine.SetSuspended(false);
+            }
             aeraScreenTimer.Wake();
             hardware.screen_off = false;
         }
-        CheckScreenTimeout(engine, hardware);
         engine.SetMouseConnected(ev_has_mouse() != 0);
         const int wait_ms = static_cast<int>(engine.RunFrame());
         // The display backend may still own/import the current GPU buffer
         // while an input event is being dispatched. Capture only here, after
         // LVGL has completed and presented a frame; direct capture from the
         // key callback could restart recovery on the Adreno/KMS backend.
-        if (hardware.screenshot_pending) {
+        const bool lock_screenshot = engine.TakeScreenshotRequest();
+        if (hardware.screenshot_pending || lock_screenshot) {
             hardware.screenshot_pending = false;
             CaptureHardwareScreenshot(engine);
         }
@@ -586,6 +597,7 @@ RunResult RunLoop(bool fastboot_mode = false,
             action = cli_transition_action;
             cli_transition_action = Action::kNone;
         }
+        if (action != Action::kNone && !engine.CanReboot()) action = Action::kNone;
         if (action != Action::kNone) {
             __android_log_print(ANDROID_LOG_INFO, kLogTag, "scene requested action %d",
                                 static_cast<int>(action));
@@ -672,6 +684,15 @@ RunResult RunLoop(bool fastboot_mode = false,
             if (reads + 1 == kInputDrainBudget)
                 break;
             result = ev_get(&event, 0);
+        }
+        // Process input before the one idle transition, and keep startup awake.
+        if (!hardware.screen_off) {
+            if ((!backend_ready_sent && !decrypt_request_sent) ||
+                gModeTransitionBusy.load(std::memory_order_acquire)) {
+                aeraScreenTimer.Wake();
+            } else {
+                CheckScreenTimeout(engine, hardware);
+            }
         }
     }
 }

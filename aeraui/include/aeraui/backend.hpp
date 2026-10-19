@@ -4,8 +4,18 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "aeraui/lock_theme.hpp"
+#include "aeraui/home_layout.hpp"
+#include "aeraui/kernel_settings.hpp"
 
 namespace aeraui {
+std::vector<kernel::Setting> RecoveryDeveloperSettings();
+bool RecoverySetDeveloperSetting(const std::string &id, const std::string &value,
+                                 bool remember, std::string *error);
+bool RecoveryResetDeveloperSettings(std::string *error);
+void RecoveryPollDeveloperSettings();
+void RecoverySkipDeveloperSettings();
+bool RecoveryExportDeveloperSettings(std::string *path, std::string *error);
 enum class Job {
   kInstall,
   kSideload,
@@ -22,7 +32,9 @@ enum class Job {
   kClearSnapshotCow,
   kRootOperation,
   kPcBackupOperation,
-  kChangeFilesystem
+  kChangeFilesystem,
+  kFormatUsb,
+  kNetworkStorage
 };
 struct Volume {
   std::string name;
@@ -38,6 +50,21 @@ struct AndroidUser {
   int credential_type = 0;
   bool decrypted = false;
 };
+struct NasConfig {
+  std::string type = "sftp";
+  std::string host;
+  std::string port = "22";
+  std::string share = "Backups";
+  std::string path;
+  std::string user;
+  std::string password;
+  std::string domain = "WORKGROUP";
+  std::string cache_mode = "off";
+  std::string auth = "password";
+  std::string key_name;
+  bool auto_connect = false;
+  std::string wifi_ssid;
+};
 struct JobRequest {
   Job job = Job::kInstall;
   std::string title;
@@ -48,6 +75,7 @@ struct JobRequest {
   bool digest = true;
   bool both_slots = false;
   std::string confirmation;
+  std::string usb_identity, usb_filesystem;
   bool present_before_run = false;
   bool show_on_device = true;
   std::string root_action;
@@ -56,6 +84,9 @@ struct JobRequest {
   std::string backup_action, backup_kind, backup_source, backup_method;
   std::string backup_storage, backup_snapshot;
   int backup_user = 0;
+  NasConfig nas_config;
+  std::string nas_action, nas_private_key;
+  bool nas_password_update = false;
   std::string payload_manifest_hash;
   std::string payload_slot;
   bool payload_arb_acknowledged = false;
@@ -88,6 +119,23 @@ struct FilesystemVolume {
 std::vector<FilesystemVolume> RecoveryFilesystemVolumes();
 // Implemented beside the stock GUI bridge, using the same recovery backend.
 std::vector<Volume> RecoveryVolumes(const std::string &kind);
+struct BackupStorage {
+  std::string name, path;
+  bool mounted = false;
+  uint64_t free_bytes = 0;
+};
+std::vector<BackupStorage> RecoveryBackupStorages();
+bool RecoveryPrepareBackupStorage(const std::string &path, std::string *error);
+bool RecoveryBackupPathReady(const std::string &path);
+std::string RecoveryAppVaultStorage();
+bool RecoveryRememberAppVaultStorage(const std::string &path);
+struct UsbFormatTarget {
+  bool available = false;
+  std::string name, path, block, filesystem, identity, error;
+  uint64_t bytes = 0;
+  std::vector<std::string> filesystems;
+};
+UsbFormatTarget RecoveryUsbFormatTarget(const std::string &path);
 std::vector<Volume> RecoveryImageVolumes();
 struct PayloadFlashTarget {
   std::string name;
@@ -113,6 +161,7 @@ PayloadFlashProgress RecoveryPayloadFlashProgress();
 std::vector<PayloadFlashTarget> RecoveryPayloadTargets(const std::vector<std::string> &names);
 std::vector<Volume> RecoveryRestoreVolumes(const std::string &folder);
 std::string RecoveryStorage();
+std::string RecoveryInternalStorage();
 std::string RecoveryBackupRoot();
 void RecoveryEnsurePcStorage();
 int RecoveryRunPcBackup(const JobRequest &request);
@@ -159,6 +208,12 @@ struct SideloadStatus {
 SideloadStatus RecoverySideloadStatus();
 bool RecoveryCancelSideload();
 int RecoveryProgress();
+struct NasTransferProgress {
+  bool active = false, confirming = false;
+  uint64_t uploaded = 0, total = 0, pending = 0, bytes_per_second = 0;
+};
+NasTransferProgress RecoveryNasTransferProgress();
+void RecoveryCancelNasWrites();
 std::string RecoveryOperationDetail();
 std::string RecoveryInstallerStatus();
 struct InstallerPresentation {
@@ -198,6 +253,7 @@ bool RecoveryVerifyScreenLock(const std::string& password);
 int RecoveryScreenLockRetrySeconds();
 void RecoveryLockScreen();
 bool RecoveryConsumeScreenUnlock();
+bool RecoveryScreenTimeoutSupported();
 bool RecoveryFlashlightSupported();
 bool RecoveryFlashlightEnabled();
 bool RecoverySetFlashlight(bool enabled);
@@ -235,6 +291,8 @@ AppearanceMode RecoveryAppearanceMode();
 bool RecoverySetAppearanceMode(AppearanceMode mode);
 std::string RecoveryWallpaperPath();
 bool RecoverySetWallpaperPath(const std::string &path);
+WallpaperLayout RecoveryWallpaperLayout();
+bool RecoverySetWallpaperLayout(const WallpaperLayout &layout);
 bool RecoveryLightMode();
 bool RecoverySetLightMode(bool enabled);
 enum class SurfaceStyle {
@@ -262,6 +320,8 @@ bool RecoverySetInterfaceSize(InterfaceSize size);
 enum class KeyboardLayout { kQwerty = 0, kQwertz = 1 };
 KeyboardLayout RecoveryKeyboardLayout();
 bool RecoverySetKeyboardLayout(KeyboardLayout layout);
+std::vector<HomePluginPreference> RecoveryHomePluginLayout();
+bool RecoverySaveHomePluginLayout(const std::vector<HomePluginPreference> &layout);
 int RecoveryHomeGridColumns();
 bool RecoverySetHomeGridColumns(int columns);
 enum class DockLayout {
@@ -300,6 +360,9 @@ bool RecoveryAutoSavePreferences();
 bool RecoveryPcAutoEnable();
 bool RecoverySetPcAutoEnable(bool enabled);
 // Reset the in-memory group; the UI then applies it and autosaves once.
+enum class ThemeSection { kAppearance, kWallpaper, kHome, kTypography,
+                          kNavigation, kStatusBar, kLock };
+bool RecoveryResetThemeSection(ThemeSection section);
 bool RecoveryResetThemeSettings();
 bool RecoveryResetPreferences();
 enum class Haptic { kTouch, kKeyboard, kAction };
@@ -413,6 +476,7 @@ struct WifiRequest {
   bool use_saved_credentials = false;
 };
 void RecoveryWifiInitialize();
+void RecoveryWifiInitializeEarly();
 WifiConnection RecoveryWifiConnection();
 WifiTraffic RecoveryWifiTraffic();
 WifiStatusDisplay RecoveryWifiStatusDisplay();
@@ -461,29 +525,26 @@ FastbootWifiStatus RecoveryFastbootWifiStatus();
 bool RecoverySetFastbootOverWifi(bool enabled);
 bool RecoverySelectFastbootTransport(bool wireless);
 
-// Native presentation of OrangeFox's existing rclone/FUSE NAS manager.
-struct NasConfig {
-  std::string type = "sftp";
-  std::string host;
-  std::string port = "22";
-  std::string share = "Backups";
-  std::string path;
-  std::string user;
-  std::string password;
-  std::string domain = "WORKGROUP";
-  std::string cache_mode = "off";
-};
+// Native presentation of AERA's SMB/SFTP FUSE network storage manager.
 struct NasStatus {
   bool supported = false;
   bool mounted = false;
   bool selected = false;
+  bool key_available = false;
+  uint64_t manual_disconnect = 0;
   std::string status;
   std::string error;
   NasConfig config;
 };
-enum class NasOperation { kMountAndUse, kUse, kUnmount };
-struct NasRequest { NasOperation operation = NasOperation::kMountAndUse; };
+enum class NasOperation { kMountAndUse, kUse, kUnmount, kMount };
+struct NasRequest {
+  NasOperation operation = NasOperation::kMountAndUse;
+  bool interactive = true;
+};
 NasStatus RecoveryNasStatus();
+NasConfig RecoverySavedNasConfig(const std::string &protocol);
 bool RecoverySetNasConfig(const NasConfig &config, std::string *error);
+bool RecoveryImportNasKey(const std::string &key, const std::string &name,
+                          std::string *error);
 int RecoveryRunNas(const NasRequest &request);
 }  // namespace aeraui

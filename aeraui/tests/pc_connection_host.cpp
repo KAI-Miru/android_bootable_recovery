@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "../../aera_remote/pc_connection.hpp"
 #include "../../aera_remote/pc_storage.hpp"
+#include "../../aera_flash_log.hpp"
 #include "../features/update/payload_inspector.hpp"
 #include "../features/update/payload_arb.hpp"
 #include "../features/root/root_manager.hpp"
@@ -72,11 +73,13 @@ int SimulateBackup(const aeraui::JobRequest &job) {
 namespace {
 std::string storage;
 bool locked = false;
+bool current_external = false;
 bool app_vault_installed = true;
 bool wifi_connected = false;
 std::string wifi_address = "127.0.0.2";
 }
 namespace aeraui {
+void RecoveryCancelNasWrites() {}
 void RecoveryEnsurePcStorage() {}
 bool AppVaultInstalled() { return app_vault_installed; }
 std::vector<AndroidUser> RecoveryAndroidUsers() {
@@ -104,8 +107,30 @@ std::vector<PayloadFlashTarget> RecoveryPayloadTargets(const std::vector<std::st
   for (const auto &name : names) targets.push_back({name, "/fixture/" + name});
   return targets;
 }
-std::string RecoveryStorage() { return storage; }
+std::string RecoveryStorage() { return current_external ? storage + "/usb" : storage; }
+std::string RecoveryInternalStorage() { return locked ? "" : storage; }
+std::vector<BackupStorage> RecoveryBackupStorages() {
+  return {{"Internal storage", storage, true, 10000000000},
+          {"USB storage", storage + "/usb", true, 5000000000}};
+}
+bool RecoveryBackupPathReady(const std::string &) { return true; }
+std::string RecoveryAppVaultStorage() { return storage; }
+NasStatus RecoveryNasStatus() {
+  NasStatus status;
+  status.supported = true;
+  status.config.host = "test-server";
+  status.config.user = "test-user";
+  status.config.password = "never-return-this-secret";
+  status.config.key_name = "id_ed25519";
+  status.key_available = true;
+  return status;
+}
 WifiConnection RecoveryWifiConnection() { return {wifi_connected, "Test network"}; }
+NasConfig RecoverySavedNasConfig(const std::string &protocol) {
+  auto config = RecoveryNasStatus().config;
+  config.type = protocol;
+  return config;
+}
 std::vector<Volume> RecoveryVolumes(const std::string &kind) {
   if (kind == "backup") return {{"Data", "/data", 2147483648}, {"Boot", "/boot", 67108864}, {"Recovery", "/recovery", 104857600}};
   return {{"USB storage", storage + "/usb"}};
@@ -170,6 +195,13 @@ ArbDecision CompareArb(bool includes_firmware, const Arb &package, const DeviceA
 }
 }
 
+namespace aera::flashlog {
+Options PlatformOptions(const std::string &, const std::string &, const std::string &) { return {}; }
+std::vector<std::string> PlatformDirectories() {
+  return {storage + "/AERA/logs/FlashLogs"};
+}
+}
+
 int main(int argc, char **argv) {
   if (argc < 3) return 2;
   // Only availability is checked; this fixture never executes a flash engine.
@@ -216,6 +248,9 @@ int main(int argc, char **argv) {
       else if (command == "off") aera::pc::SetEnabled(false, port, false);
       else if (command == "on") {
         if (!aera::pc::SetEnabled(true, port, false)) return 5;
+      }
+      else if (command == "current-usb" || command == "current-internal") {
+        current_external = command == "current-usb"; aera::pc::RefreshPlatformInfo();
       }
       else if (command == "lock" || command == "unlock") {
         locked = command == "lock"; aera::pc::RefreshPlatformInfo();

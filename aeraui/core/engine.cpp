@@ -8,6 +8,8 @@
 #include "aeraui/i18n.hpp"
 #include "operation_affinity.hpp"
 #include "mouse_cursor.hpp"
+#include "usb_attachment.hpp"
+#include "screenshot_flash.hpp"
 #include "src/misc/cache/instance/lv_image_cache.h"
 
 #include <algorithm>
@@ -46,6 +48,8 @@
 #include "../../aera_rpc/aera_channel.hpp"
 #include "../../aera_remote/aera_remote.hpp"
 #include "../../aera_remote/pc_connection.hpp"
+#include "../../aera_remote/backup_cancel.hpp"
+#include <aeraui/nas_auto_connect.hpp>
 #include "../../aera_rpc/aera_dispatcher.hpp"
 
 extern "C" int aeraui_install_package(const char *path);
@@ -494,8 +498,6 @@ public:
   uint32_t RunFrame() {
     if (!initialized_)
       return kFrameIntervalMs;
-    if (suspended_)
-      return 250;
 #ifndef TW_OEM_BUILD
     const int rpc_fd = aera::rpc::Channel::InputFd();
     if (rpc_fd >= 0) {
@@ -513,10 +515,15 @@ public:
     recorder::Poll();
     if (fastboot_mode_) PollFastbootTelemetry();
     if (operation_complete_.exchange(false, std::memory_order_acq_rel)) {
+      if (operation_visible_ && (suspended_ || (lock_overlay_ && lock_ambient_)))
+        wake_requested_ = true;
       if (operation_thread_.joinable())
         operation_thread_.join();
       const auto cancellation = aera::pc::GetBackupCancellation();
-      const bool pc_cancelled = operation_scene_.job == Job::kPcBackupOperation && cancellation.requested;
+      const auto local = aera::backup::Operations().Snapshot();
+      const bool pc_cancelled = backup_token_ && ((local.token == backup_token_ && local.requested) ||
+          (operation_scene_.job == Job::kPcBackupOperation && cancellation.requested));
+      operation_scene_.cancelled = pc_cancelled;
       const bool success = operation_result_.load(std::memory_order_acquire) == 0 && !pc_cancelled;
       if (!pc_job_id_.empty()) {
         aera::pc::UpdateInstallerPresentation(RecoveryInstallerPresentation());
@@ -534,13 +541,14 @@ public:
             RecoverySideloadStatus().cancel_requested;
         CompleteOperationScene(
             operation_scene_, success,
-            pc_cancelled ? (cancellation.restore
+            pc_cancelled ? (operation_scene_.job == Job::kRestore || local.restore
                 ? "Stopping a restore may leave incomplete data. Complete a full restore before booting Android."
                 : "An unfinished backup cannot be restored.") : sideload_cancelled
                 ? "ADB sideload was cancelled. Normal ADB has been restored."
                 : success
                       ? "The requested operation completed. Review its output below."
-                      : "The backend reported an error. Review the recovery log below.");
+                      : "The backend reported an error. Review the recovery log below.",
+            static_cast<uint32_t>(operation_finished_ms_.load(std::memory_order_acquire) - operation_started_ms_));
       }
       operation_running_ = false;
     }
@@ -588,7 +596,9 @@ public:
     if (nas_complete_.exchange(false, std::memory_order_acq_rel)) {
       if (nas_thread_.joinable()) nas_thread_.join();
       const bool success = nas_result_.load(std::memory_order_acquire) == 0;
-      CompleteNasOperation(nas_scene_, success);
+      if (nas_report_state_ && current_scene_ == Action::kNas && nas_scene_.state == nas_report_state_)
+        CompleteNasOperation(nas_scene_, success);
+      nas_report_state_ = nullptr;
       nas_running_ = false;
     }
     if (plugin_complete_.exchange(false, std::memory_order_acq_rel)) {
@@ -599,12 +609,16 @@ public:
       const plugins::Job completed_job = plugin_job_;
       plugin_running_ = false;
       plugin_task_ = PluginTask::kNone;
-      if (completed == PluginTask::kInteractive &&
-          current_scene_ == Action::kPlugins) {
-        CompletePluginOperation(plugin_scene_, success, message.c_str());
-        if (success && completed_job == plugins::Job::kRefresh &&
-            RecoveryPreference(Preference::kPluginAutoUpdate))
-          BeginAutomaticPluginUpdates();
+      if (completed == PluginTask::kInteractive) {
+        if (current_scene_ == Action::kPlugins) {
+          CompletePluginOperation(plugin_scene_, success, message.c_str());
+          if (success && completed_job == plugins::Job::kRefresh &&
+              RecoveryPreference(Preference::kPluginAutoUpdate))
+            BeginAutomaticPluginUpdates();
+        } else if (on_home_) {
+          ShowHome(false);
+          if (!success) widgets::Sheet(lv_screen_active(), "Operation failed", message);
+        }
       } else if (completed == PluginTask::kBackgroundRefresh) {
         if (success)
           BeginAutomaticPluginUpdates();
@@ -661,7 +675,12 @@ public:
     }
     PollAutomaticUpdates();
     PollPcConnection();
+    PollAutomaticNas();
+    if (backend_ready_ && !fastboot_mode_ && CanReboot())
+      RecoveryPollDeveloperSettings();
+    PollUsbAttachment();
     PollRecentsHold();
+    if (suspended_) return 250;
     const uint32_t next = lv_timer_handler();
 #ifndef TW_OEM_BUILD
     // Capture only after LVGL has flushed and DRM exposes the newly presented
@@ -675,6 +694,11 @@ public:
     const Action action = pending_action_;
     pending_action_ = Action::kNone;
     return action;
+  }
+  bool TakeScreenshotRequest() {
+    const bool requested = screenshot_requested_;
+    screenshot_requested_ = false;
+    return requested;
   }
 
   DecryptionCompletion TakeDecryptionCompletion() {
@@ -723,7 +747,7 @@ public:
       return;
     }
     if (lock_overlay_ != nullptr || !backend_ready_ || decryption_active_ ||
-        operation_running_ || nas_running_ || plugin_running_)
+        operation_running_ || (nas_running_ && nas_interactive_) || plugin_running_)
       return;
     if (widgets::DismissModal(lv_screen_active())) return;
     if (fastboot_mode_) {
@@ -912,7 +936,8 @@ public:
     }
     // Global raw-input consumers live below lock/operation overlays. Keep
     // those consumers from stealing contacts that belong to trusted AERA UI.
-    if (suspended_ || lock_overlay_ != nullptr || power_overlay_ != nullptr ||
+    if (widgets::PointerDragActive() || suspended_ || lock_overlay_ != nullptr ||
+        power_overlay_ != nullptr ||
         !backend_ready_ ||
         operation_running_ || nas_running_ || plugin_running_ ||
         update_installing_ ||
@@ -1103,6 +1128,7 @@ public:
       if (input && lv_textarea_get_password_mode(input)) lv_textarea_set_text(input, "");
     }
     suspended_ = suspended;
+    if (!suspended) wake_requested_ = false;
     SetMouseConnected(mouse_connected_);
     if (suspended_ && mouse_device_) {
       mouse_pressed_ = false; lv_indev_reset(mouse_device_, nullptr);
@@ -1114,15 +1140,20 @@ public:
     if (pointer_device_ != nullptr) lv_indev_reset(pointer_device_, nullptr);
   }
 
-  void ShowLockScreen() {
+  void ShowLockScreen(bool ambient = false) {
     ResetKeyboard();
-    if (!initialized_ || lock_overlay_ != nullptr) return;
+    if (!initialized_) return;
+    if (lock_overlay_ && lock_ambient_ == ambient) return;
+    CloseStatusBarShades();
+    if (lock_overlay_) { lv_obj_delete(lock_overlay_); lock_overlay_ = nullptr; }
+    screen_credential_scene_ = {};
+    lock_ambient_ = ambient;
     RecoveryLockScreen();
     CancelEdgeSwipe();
     CancelRecentsSwipe();
     pointer_.pressed = false;
     if (pointer_device_ != nullptr) lv_indev_reset(pointer_device_, nullptr);
-    lock_overlay_ = BuildLockScene(lv_layer_top(), HandleSceneAction, this, &screen_credential_scene_);
+    lock_overlay_ = BuildLockScene(lv_layer_top(), HandleSceneAction, this, false, nullptr, ambient, &screen_credential_scene_);
   }
 
   void RebuildLockScreen() {
@@ -1132,12 +1163,36 @@ public:
     lock_overlay_ = nullptr;
     screen_credential_scene_ = {};
     lv_obj_delete_async(previous);
-    ShowLockScreen();
+    ShowLockScreen(lock_ambient_);
   }
 
+  bool CanReboot() const {
+    return !operation_running_ && !nas_running_ && !plugin_running_ && !decrypt_running_ &&
+        !aera::backup::Operations().Active();
+  }
+  bool NeedsWake() const {
+    return wake_requested_ || (operation_visible_ && (operation_complete_.load(std::memory_order_acquire) ||
+        (operation_running_ && RecoveryInstallerPrompt().active)));
+  }
+  bool WakeForOperation() {
+    if (!backend_ready_ || !interactive_ready_ || decryption_active_ || decrypt_running_ ||
+        !NeedsWake()) return false;
+    if (RecoveryScreenLockEnabled()) {
+      // Waking an operation must not grant access to an unlocked owner session.
+      // Show the bouncer even if inactivity had not built an overlay yet.
+      ShowLockScreen(false);
+    } else if (lock_overlay_) {
+      auto *lock = lock_overlay_;
+      lock_overlay_ = nullptr;
+      lock_ambient_ = false;
+      lv_obj_delete(lock);
+    }
+    SetSuspended(false);
+    return true;
+  }
   void ShowPowerMenu() {
     ResetKeyboard();
-    if (!initialized_ || power_overlay_ != nullptr || suspended_) return;
+    if (!initialized_ || power_overlay_ != nullptr || suspended_ || !CanReboot()) return;
     CancelEdgeSwipe();
     CancelRecentsSwipe();
     pointer_.pressed = false;
@@ -1209,6 +1264,7 @@ public:
                      190 + row * 246);
       lv_obj_set_size(button, button_width, button_height);
       widgets::OnClick(button, [this, destination] {
+        if (!CanReboot()) { DismissPowerMenu(); return; }
         const bool power_off = destination.action == Action::kPowerOff;
         const std::string transition_title = power_off
             ? "Powering off"
@@ -1356,8 +1412,65 @@ public:
     displayed_volume_ = percent;
   }
 
+  void PollUsbAttachment() {
+    const uint32_t now = MonotonicMilliseconds();
+    if (now - last_usb_poll_ < 1000) return;
+    last_usb_poll_ = now;
+    const auto storage = usb_attachments_.Update(UsbAttachments());
+    const auto inputs = ExternalInputAttachments();
+    const auto mouse = mouse_attachments_.Update(inputs.mice);
+    const auto keyboard = keyboard_attachments_.Update(inputs.keyboards);
+    if (!storage && !mouse && !keyboard) return;
+    std::string message;
+    const auto append = [&message](const AttachmentChanges &changes,
+                                  const char *connected, const char *disconnected) {
+      for (const auto &line : {changes.disconnected ? disconnected : "",
+                               changes.connected ? connected : ""}) {
+        if (!*line) continue;
+        if (!message.empty()) message += "\n";
+        message += i18n::Translate(line);
+      }
+    };
+    append(storage, "USB storage connected", "USB storage disconnected");
+    append(mouse, "Mouse connected", "Mouse disconnected");
+    append(keyboard, "Keyboard connected", "Keyboard disconnected");
+    // A passive notice must never cover a destructive operation, unlock prompt,
+    // or fastboot handover. Suppressed notices are not replayed later.
+    if (!interactive_ready_ || suspended_ || decryption_active_ || decrypt_running_ ||
+        operation_running_ || fastboot_mode_ || lock_overlay_ || power_overlay_ ||
+        recents_overlay_ || StatusBarShadeOpen()) return;
+    if (notice_overlay_) lv_obj_delete(notice_overlay_);
+    auto *panel = lv_obj_create(lv_layer_top());
+    notice_overlay_ = panel;
+    design::Panel(panel, 42, design::kMainSheet);
+    const int lines = 1 + std::count(message.begin(), message.end(), '\n');
+    lv_obj_set_size(panel, std::min(1080, static_cast<int>(lv_obj_get_width(lv_layer_top())) - 80), 100 + lines * 60);
+    lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, 200);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(panel, [](lv_event_t *event) {
+      auto *self = static_cast<Impl *>(lv_event_get_user_data(event));
+      if (self->notice_overlay_ == lv_event_get_target(event)) self->notice_overlay_ = nullptr;
+    }, LV_EVENT_DELETE, this);
+    auto *label = design::Label(panel, message.c_str(), &lv_font_montserrat_36, design::kText);
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_width(label, LV_PCT(90));
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_fade_in(panel, 160, 0);
+    lv_obj_delete_delayed(panel, 3500);
+  }
+
   void ShowScreenshotResult(bool success) {
     if (!initialized_) return;
+    if (success) {
+      if (screenshot_flash_) lv_obj_delete(screenshot_flash_);
+      screenshot_flash_ = ScreenshotFlash(lv_layer_top());
+      lv_obj_add_event_cb(screenshot_flash_, [](lv_event_t *event) {
+        auto *self = static_cast<Impl *>(lv_event_get_user_data(event));
+        if (self->screenshot_flash_ == lv_event_get_target(event)) self->screenshot_flash_ = nullptr;
+      }, LV_EVENT_DELETE, this);
+      return;
+    }
     if (notice_overlay_ != nullptr) lv_obj_delete(notice_overlay_);
     auto *panel = lv_obj_create(lv_layer_top());
     notice_overlay_ = panel;
@@ -2425,14 +2538,19 @@ private:
       });
       return;
     }
+    if (action == Action::kLockScreenshot) {
+      if (self->lock_overlay_) self->screenshot_requested_ = true;
+      return;
+    }
     if (action == Action::kUnlock) {
       if (!RecoveryConsumeScreenUnlock()) return;
       if (self->lock_overlay_ != nullptr) {
         lv_obj_t *lock = self->lock_overlay_;
         self->lock_overlay_ = nullptr;
         self->screen_credential_scene_ = {};
-        lv_obj_fade_out(lock, 220, 0);
-        lv_obj_delete_delayed(lock, 230);
+        self->lock_ambient_ = false;
+        // The lock scene completes its gesture-specific exit before notifying us.
+        lv_obj_delete_async(lock);
       }
       return;
     }
@@ -2466,25 +2584,31 @@ private:
       return;
     }
 
-    if (action == Action::kCancelPcBackup && self->operation_running_ &&
-        self->operation_scene_.job == Job::kPcBackupOperation) {
-      const auto pending = aera::pc::GetBackupCancellation();
-      if (!pending.active || pending.requested || self->PcBlockedByModal()) return;
+    if (action == Action::kCancelPcBackup && self->operation_running_) {
+      const auto pending = aera::backup::Operations().Snapshot();
+      if (!pending.active || pending.token != self->backup_token_ ||
+          pending.requested || self->PcBlockedByModal()) return;
+      auto cancel = [self, token = pending.token, restore = pending.restore] {
+        if (!aera::backup::Operations().Request(token, restore)) return;
+        RecoveryCancelNasWrites();
+        if (self->operation_scene_.job == Job::kPcBackupOperation) {
+          const auto pc = aera::pc::GetBackupCancellation();
+          if (pc.active) aera::pc::CancelBackup(pc.id, restore);
+        }
+      };
       auto *screen = lv_screen_active();
       if (pending.restore) {
         widgets::Sheet(screen, "Cancel restore",
             "Stopping a restore may leave incomplete data. Complete a full restore before booting Android.",
-            [screen, id = pending.id] {
-              const auto current = aera::pc::GetBackupCancellation();
-              if (!current.active || current.id != id || current.requested) return;
+            [screen, token = pending.token, cancel] {
+              const auto current = aera::backup::Operations().Snapshot();
+              if (!current.active || current.token != token || current.requested) return;
               widgets::Sheet(screen, "Confirm restore cancellation",
                   "Stopping a restore may leave incomplete data. Complete a full restore before booting Android.",
-                  [id] { aera::pc::CancelBackup(id, true); });
+                  cancel);
             });
       } else {
-        widgets::Sheet(screen, "Cancel backup",
-            "An unfinished backup cannot be restored.",
-            [id = pending.id] { aera::pc::CancelBackup(id, false); });
+        widgets::Sheet(screen, "Cancel backup", "An unfinished backup cannot be restored.", cancel);
       }
       return;
     }
@@ -2496,7 +2620,7 @@ private:
       return;
     }
 
-    if (self->operation_running_ || self->nas_running_ || self->plugin_running_ ||
+    if (self->operation_running_ || (self->nas_running_ && self->nas_interactive_) || self->plugin_running_ ||
         (self->update_running_ &&
          self->update_task_ == UpdateTask::kDownload)) return;
     self->CancelEdgeSwipe();
@@ -2813,6 +2937,16 @@ private:
       return;
     }
 
+    if (action == Action::kArtillery) {
+      self->TrackScene(action);
+      self->on_home_ = false;
+      self->current_tool_ = action;
+      lv_obj_t *screen = lv_obj_create(nullptr);
+      BuildArtilleryScene(screen, HandleSceneAction, self);
+      lv_screen_load_anim(screen, LV_SCR_LOAD_ANIM_FADE_ON, 120, 0, true);
+      return;
+    }
+
     if (action == Action::kAbout) {
       self->TrackScene(action);
       self->on_home_ = false;
@@ -2840,7 +2974,11 @@ private:
         action == Action::kMounts || action == Action::kLogs ||
         action == Action::kPreferences || action == Action::kLanguage ||
         action == Action::kStatusBar || action == Action::kTemperatures ||
-        action == Action::kTheme ||
+        action == Action::kTheme || action == Action::kThemeAppearance ||
+        action == Action::kThemeWallpaper || action == Action::kThemeHome ||
+        action == Action::kThemeTypography || action == Action::kThemeNavigation ||
+        action == Action::kThemeLock ||
+        action == Action::kDeveloperSettings ||
         action == Action::kWifi || action == Action::kUsers ||
         action == Action::kPcConnection;
     if (action == Action::kOpenReboot || action == Action::kBackHome ||
@@ -3131,7 +3269,14 @@ private:
   void StartJob(const JobRequest &request) {
     if (operation_running_ || wifi_running_ || nas_running_ || plugin_running_)
       return;
+    DismissPowerMenu();
     operation_visible_ = request.show_on_device;
+    operation_started_ms_ = MonotonicMilliseconds();
+    const bool backup = request.job == Job::kBackup || request.job == Job::kRestore ||
+        request.job == Job::kUploadBackup || (request.job == Job::kPcBackupOperation &&
+        (request.backup_action == "backup" || request.backup_action == "restore"));
+    backup_token_ = backup ? aera::backup::Operations().Begin(
+        request.job == Job::kRestore || request.backup_action == "restore") : 0;
     if (operation_visible_) {
       current_tool_ = Action::kNone;
       on_home_ = false;
@@ -3154,6 +3299,8 @@ private:
       if (request.present_before_run)
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
       const int result = RecoveryRunJob(request);
+      operation_finished_ms_.store(MonotonicMilliseconds(), std::memory_order_release);
+      if (backup_token_) aera::backup::Operations().Finish(backup_token_);
       operation_result_.store(result, std::memory_order_release);
       operation_complete_.store(true, std::memory_order_release);
     });
@@ -3175,10 +3322,37 @@ private:
     });
   }
 
+  void PollAutomaticNas() {
+    const uint32_t now = MonotonicMilliseconds();
+    if (now - last_nas_auto_poll_ < 2000) return;
+    last_nas_auto_poll_ = now;
+    if (!interactive_ready_ || decryption_active_ || decrypt_running_ ||
+        operation_running_ || wifi_running_ || nas_running_ || plugin_running_ ||
+        update_running_ || fastboot_mode_ || PcBlockedByModal() ||
+        current_scene_ == Action::kAppVault || current_scene_ == Action::kRootManager) return;
+    const auto wifi = RecoveryWifiConnection();
+    const auto nas = RecoveryNasStatus();
+    const auto &config = nas.config;
+    if (nas.manual_disconnect != nas_manual_disconnect_) {
+      nas_manual_disconnect_ = nas.manual_disconnect;
+      nas_auto_connect_.Suppress();
+    }
+    const bool enabled = nas.supported && config.auto_connect && !config.host.empty() &&
+        !config.wifi_ssid.empty() && wifi.connected && wifi.ssid == config.wifi_ssid;
+    const std::string profile = config.type + "\n" + config.host + "\n" + config.port +
+        "\n" + config.share + "\n" + config.path + "\n" + config.user;
+    if (nas_auto_connect_.Ready(wifi.connected ? wifi.ssid : "", profile, enabled, nas.mounted, now))
+      StartNas({NasOperation::kMount, false});
+  }
+
   void StartNas(const NasRequest &request) {
     if (nas_running_ || operation_running_ || wifi_running_ || plugin_running_)
       return;
-    SetNasBusy(nas_scene_, request);
+    if (request.interactive && request.operation == NasOperation::kUnmount)
+      nas_auto_connect_.Suppress();
+    nas_interactive_ = request.interactive;
+    nas_report_state_ = request.interactive && current_scene_ == Action::kNas ? nas_scene_.state : nullptr;
+    if (nas_report_state_) SetNasBusy(nas_scene_, request);
     nas_running_ = true;
     nas_result_.store(-1, std::memory_order_release);
     nas_complete_.store(false, std::memory_order_release);
@@ -3194,8 +3368,8 @@ private:
                    PluginTask task = PluginTask::kInteractive) {
     if (plugin_running_ || operation_running_ || wifi_running_ || nas_running_)
       return;
-    if (task == PluginTask::kInteractive ||
-        (task == PluginTask::kAutomaticInstall && current_scene_ == Action::kPlugins))
+    if ((task == PluginTask::kInteractive || task == PluginTask::kAutomaticInstall) &&
+        current_scene_ == Action::kPlugins)
       SetPluginBusy(plugin_scene_, request);
     plugin_progress_.value.store(0);
     plugin_progress_.downloaded_bytes.store(0);
@@ -3805,12 +3979,17 @@ private:
   std::shared_ptr<RecentPreview> recent_launch_preview_;
   RecentApp recent_launch_app_;
   lv_obj_t *lock_overlay_ = nullptr;
+  bool lock_ambient_ = false;
   lv_obj_t *power_overlay_ = nullptr;
   lv_obj_t *volume_overlay_ = nullptr;
   lv_obj_t *volume_icon_ = nullptr;
   lv_obj_t *volume_label_ = nullptr;
   lv_obj_t *volume_fill_ = nullptr;
   lv_timer_t *volume_hide_timer_ = nullptr;
+  UsbAttachmentTracker usb_attachments_;
+  lv_obj_t *screenshot_flash_ = nullptr;
+  UsbAttachmentTracker mouse_attachments_, keyboard_attachments_;
+  uint32_t last_usb_poll_ = 0;
   lv_obj_t *notice_overlay_ = nullptr;
   lv_obj_t *pc_overlay_ = nullptr;
   widgets::PcTransferBanner pc_transfer_;
@@ -3826,6 +4005,11 @@ private:
   bool screen_verify_running_ = false;
   WifiScene wifi_scene_{};
   NasScene nas_scene_{};
+  NasAutoConnectPolicy nas_auto_connect_;
+  uint32_t last_nas_auto_poll_ = 0;
+  uint64_t nas_manual_disconnect_ = 0;
+  void *nas_report_state_ = nullptr;
+  bool nas_interactive_ = true;
   PluginScene plugin_scene_{};
   UpdateScene update_scene_{};
   std::string selected_package_;
@@ -3837,6 +4021,9 @@ private:
   std::thread update_thread_;
   std::atomic<int> operation_result_{-1};
   std::atomic<bool> operation_complete_{false};
+  bool wake_requested_ = false;
+  std::atomic<uint64_t> operation_finished_ms_{0};
+  uint64_t operation_started_ms_ = 0, backup_token_ = 0;
   std::atomic<int> decrypt_result_{-1};
   std::atomic<bool> decrypt_complete_{false};
   std::atomic<int> wifi_result_{-1};
@@ -3853,6 +4040,7 @@ private:
   std::vector<lv_obj_t *> recents_deferred_cards_;
   std::vector<lv_obj_t *> recents_all_cards_;
   Action pending_action_ = Action::kNone;
+  bool screenshot_requested_ = false;
   DecryptionCompletion decryption_completion_ = DecryptionCompletion::kNone;
   uint32_t submit_window_start_ms_ = 0;
   uint32_t last_submit_ms_ = 0;
@@ -3955,6 +4143,9 @@ void Engine::SetFastbootMode(bool enabled, bool show_recovery_home) {
 void Engine::AbandonForTerminalAction() { impl_.release(); }
 uint32_t Engine::RunFrame() { return impl_->RunFrame(); }
 Action Engine::TakeAction() { return impl_->TakeAction(); }
+bool Engine::TakeScreenshotRequest() {
+  return impl_->TakeScreenshotRequest();
+}
 void Engine::NavigateHome() { impl_->NavigateHome(); }
 void Engine::NavigateBack() { impl_->NavigateBack(); }
 void Engine::SetBackendReady() { impl_->SetBackendReady(); }
@@ -3974,8 +4165,11 @@ void Engine::MouseWheel(int steps) { impl_->MouseWheel(steps); }
 bool Engine::KeyboardKey(unsigned code, int value) { return impl_->KeyboardKey(code, value); }
 void Engine::ResetKeyboard() { impl_->ResetKeyboard(); }
 void Engine::SetSuspended(bool suspended) { impl_->SetSuspended(suspended); }
-void Engine::ShowLockScreen() { impl_->ShowLockScreen(); }
+void Engine::ShowLockScreen(bool ambient) { impl_->ShowLockScreen(ambient); }
 void Engine::ShowPowerMenu() { impl_->ShowPowerMenu(); }
+bool Engine::CanReboot() const { return impl_->CanReboot(); }
+bool Engine::NeedsWake() const { return impl_->NeedsWake(); }
+bool Engine::WakeForOperation() { return impl_->WakeForOperation(); }
 void Engine::ShowVolume(int percent) { impl_->ShowVolume(percent); }
 void Engine::ShowScreenshotResult(bool success) {
   impl_->ShowScreenshotResult(success);

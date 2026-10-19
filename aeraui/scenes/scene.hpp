@@ -52,7 +52,8 @@ struct OperationScene {
   lv_obj_t *installer_prompt_message = nullptr;
   lv_obj_t *installer_prompt_accept = nullptr;
   lv_obj_t *installer_prompt_decline = nullptr;
-  uint32_t started = 0;
+  uint32_t started = 0, elapsed_ms = 0;
+  bool completed = false, cancelled = false;
   unsigned installer_lines = 0;
   Job job = Job::kInstall;
   bool pc_restore = false;
@@ -119,6 +120,9 @@ struct UpdateScene {
 void BuildBootScene(lv_obj_t *screen, ActionCallback callback, void *context);
 void CompleteBootScene(lv_obj_t *screen);
 void BuildHomeScene(lv_obj_t *screen, ActionCallback callback, void *context);
+void BuildHomeAppearancePreview(lv_obj_t *parent);
+void BuildDeveloperScene(lv_obj_t *screen, ActionCallback callback, void *context);
+void ArmDeveloperEntryGuard();
 void BuildFilesScene(lv_obj_t *screen, ActionCallback callback, void *context);
 void BuildToolScene(lv_obj_t *screen, Action tool, ActionCallback callback,
                     void *context);
@@ -158,6 +162,7 @@ void BuildGenericPluginScene(lv_obj_t *screen, const std::string &id,
 void BuildRootManagerScene(lv_obj_t *screen, ActionCallback callback,
                            void *context);
 void BuildAboutScene(lv_obj_t *screen, ActionCallback callback, void *context);
+void BuildArtilleryScene(lv_obj_t *screen, ActionCallback callback, void *context);
 void BuildTerminalScene(lv_obj_t *screen, ActionCallback callback,
                         void *context);
 void BuildSideloadScene(lv_obj_t *screen, ActionCallback callback,
@@ -172,8 +177,8 @@ const char *GetSelectedPackagePath();
 void SetSelectedPackagePath(const char *path);
 OperationScene BuildOperationScene(lv_obj_t *screen, const char *path,
                                    ActionCallback callback, void *context);
-void CompleteOperationScene(const OperationScene &scene, bool success,
-                            const char *detail);
+void CompleteOperationScene(OperationScene &scene, bool success,
+                            const char *detail, uint32_t elapsed_ms = UINT32_MAX);
 DecryptScene BuildDecryptScene(lv_obj_t *screen, int credential_type,
                                bool file_based, int user_id,
                                int pattern_grid_size,
@@ -188,7 +193,9 @@ void ClearDecryptCredential(const DecryptScene &scene);
 void CompleteScreenCredentialAttempt(const DecryptScene &scene, bool success, int retry_seconds);
 void BuildPreparingScene(lv_obj_t *screen, bool decrypted);
 lv_obj_t *BuildLockScene(lv_obj_t *parent, ActionCallback callback,
-                         void *context, DecryptScene *bouncer = nullptr);
+                         void *context, bool preview = false,
+                         const LockTheme *theme = nullptr, bool ambient = false,
+                         DecryptScene *bouncer = nullptr);
 void SetJobRequest(const JobRequest &request);
 JobRequest GetJobRequest();
 OperationScene BuildJobScene(lv_obj_t *screen, const JobRequest &request,

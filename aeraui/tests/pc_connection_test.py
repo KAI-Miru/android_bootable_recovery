@@ -4,6 +4,7 @@ import hashlib
 import base64
 import http.client
 import http.server
+import io
 import json
 import os
 import pathlib
@@ -17,6 +18,7 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
 
 
 class PcConnectionTest(unittest.TestCase):
@@ -396,6 +398,21 @@ class PcConnectionTest(unittest.TestCase):
 
     def test_04_image_targets_and_storage_are_validated(self):
         data = b"image fixture" * 8192
+        self.command("current-usb")
+        try:
+            info = self.request("/api/status")[1]
+            self.assertEqual(info["transfer_storage"]["path"], str(self.root))
+            self.assertTrue(any(item["path"] == str(self.root / "usb") for item in info["storages"]))
+            self.assertEqual(next(item["name"] for item in info["storages"]
+                                  if item["path"] == str(self.root / "usb")), "USB storage")
+            self.assertNotIn("Current storage", [item["name"] for item in info["storages"]])
+            self.assertEqual(self.prepare(data, storage=str(self.root / "usb"))[0], 409)
+            self.command("lock")
+            self.assertIsNone(self.request("/api/status")[1]["transfer_storage"])
+            self.assertEqual(self.prepare(data)[0], 409)
+        finally:
+            self.command("unlock")
+            self.command("current-internal")
         self.assertEqual(self.prepare(data, storage="/tmp")[0], 409)
         self.assertEqual(self.prepare(data, kind="img", partition="/bad", both_slots=False)[0], 400)
         self.assertEqual(self.prepare(data, kind="img", partition="/system", both_slots=True)[0], 400)
@@ -495,6 +512,58 @@ class PcConnectionTest(unittest.TestCase):
         self.assertEqual(self.request("/api/hello", token="")[1]["certificate"], hello["certificate"])
         _, approved = self.request("/api/connect", {"key": self.key, "name": "Test computer"}, token="")
         type(self).token = approved["token"]
+
+    def test_05bb_flash_reports_are_authenticated_bounded_downloads(self):
+        folder = self.root / "AERA" / "logs" / "FlashLogs"
+        folder.mkdir(parents=True, exist_ok=True)
+        names = []
+        for index, result in enumerate(("SUCCESS", "FAILED", "INCOMPLETE")):
+            name = f"flash_20261015_10000{index}_ABCDEF_{result}.zip"
+            names.append(name)
+            with zipfile.ZipFile(folder / name, "w") as report:
+                report.writestr("summary.txt", f"Result: {result}\nKeep current ABL: 1\n")
+                report.writestr("logcat.txt", "diagnostic fixture\n")
+            os.utime(folder / name, (100 + index, 100 + index))
+        unrelated = folder / "keep.zip"
+        unrelated.write_bytes(b"not an automatic report")
+        self.assertEqual(self.request("/api/log/flashes", token="")[0], 401)
+        self.assertEqual(self.request("/api/log/flash/" + names[-1], token="")[0], 401)
+        status, result = self.request("/api/log/flashes")
+        self.assertEqual(status, 200)
+        self.assertEqual([entry["name"] for entry in result["reports"]], list(reversed(names[1:])))
+        self.assertFalse((folder / names[0]).exists())
+        self.assertTrue(unrelated.exists())
+        status, content = self.request("/api/log/flash/" + names[-1], raw=True)
+        self.assertEqual(status, 200)
+        with zipfile.ZipFile(io.BytesIO(content)) as report:
+            self.assertIn(b"Keep current ABL: 1", report.read("summary.txt"))
+        self.assertEqual(self.request("/api/log/flash/keep.zip")[0], 404)
+        self.assertNotEqual(self.request("/api/log/flash/../keep.zip")[0], 200)
+        self.command("busy")
+        self.assertEqual(self.request("/api/log/flashes")[0], 409)
+        self.assertEqual(self.request("/api/log/flash/" + names[-1])[0], 409)
+        self.command("idle")
+
+    def test_05b_network_storage_metadata_and_queue(self):
+        self.assertEqual(self.request("/api/nas", {"action": "save"}, token="")[0], 401)
+        status, info = self.request("/api/status")
+        self.assertEqual(status, 200)
+        self.assertTrue(info["nas"]["supported"])
+        self.assertTrue(info["nas"]["password_saved"])
+        self.assertNotIn("never-return-this-secret", json.dumps(info))
+        self.assertNotIn("password", info["nas"])
+        self.assertNotIn("private_key", info["nas"])
+        self.assertGreaterEqual(len(info["backup_storages"]), 2)
+        for action in ({}, {"action": {}}, {"action": "invalid"}, {"action": "save", "host": {}}):
+            self.assertEqual(self.request("/api/nas", action)[0], 400)
+        status, job = self.request("/api/nas", {"action": "save", "type": "sftp", "host": "test-server",
+                                              "password": "secret-test", "private_key": "private-test"})
+        self.assertEqual(status, 200)
+        self.assertNotIn("secret-test", json.dumps(job))
+        self.assertNotIn("private-test", json.dumps(job))
+        self.command("run")
+        self.wait_phase("completed")
+        self.command("hold")
 
     def test_05c_root_and_reboot_are_confirmed_queued_jobs(self):
         self.command("run")

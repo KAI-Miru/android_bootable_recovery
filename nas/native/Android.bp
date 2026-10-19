@@ -1,0 +1,21 @@
+package {
+    default_applicable_licenses: ["aera_netfs_license"],
+}
+
+license {
+    name: "aera_netfs_license",
+    visibility: [":__subpackages__"],
+    license_kinds: [
+        "SPDX-license-identifier-Apache-2.0",
+    ],
+}
+
+cc_binary {
+    name: "aera-netfs",
+    recovery: true,
+    srcs: ["main.c", "smb.c", "sftp.c", "filesystem.c"],
+    static_libs: ["libsmb2", "libssh2", "libaera_fuse3", "libjson-c"],
+    shared_libs: ["libcrypto", "libdl"],
+    cflags: ["-D_FILE_OFFSET_BITS=64", "-Wall", "-Wextra", "-Werror", "-Wno-macro-redefined"],
+    stl: "none",
+}

@@ -27,15 +27,18 @@ static uint64_t MonotonicMilliseconds() { return now_seconds * 1000ULL; }
 static void WriteVolume(int) {}
 struct PointerEvent { int x, y, slot; bool pressed; };
 struct InteractionBoost { void Boost() {} };
+struct TestLockTheme { bool aod = false; int aod_brightness = 10; };
+static TestLockTheme theme;
+static TestLockTheme RecoveryLockTheme() { return theme; }
 struct Engine {
   int pointers = 0, locks = 0;
-  bool suspended = false;
+  bool suspended = false, ambient = false;
   void MouseMove(int, int) {}
   void MouseWheel(int) {}
   void MouseButton(bool) {}
   void SetPointer(PointerEvent) { ++pointers; }
   bool KeyboardKey(int key, int) { return key == KEY_A; }
-  void ShowLockScreen() { ++locks; }
+  void ShowLockScreen(bool clock = false) { ++locks; ambient = clock; }
   void SetSuspended(bool value) { suspended = value; }
   void RunFrame() {}
   void ShowVolume(int) {}
@@ -105,5 +108,22 @@ int main() {
   aeraScreenTimer.SetTimeout(-1);
   now_seconds += 10000;
   assert(!aeraScreenTimer.IsScreenOff());
+  // An ambient timeout keeps rendering and builds the ambient overlay once.
+  theme.aod = true;
+  aeraScreenTimer.SetTimeout(10);
+  now_seconds += 10;
+  const int old_locks = engine.locks;
+  CheckScreenTimeout(engine, hardware);
+  assert(hardware.screen_off && !engine.suspended && engine.ambient);
+  assert(engine.locks == old_locks + 1 && brightness == "10");
+  CheckScreenTimeout(engine, hardware);
+  assert(engine.locks == old_locks + 1);
+  power.value = 1;
+  HandleEvent(engine, performance, hardware, power);
+  assert(!hardware.screen_off && !engine.suspended && !engine.ambient);
+  assert(brightness == "1234");
+  power.value = 0;
+  HandleEvent(engine, performance, hardware, power);
+  assert(!hardware.screen_off);
 #endif
 }
