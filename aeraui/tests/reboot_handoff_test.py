@@ -35,6 +35,9 @@ class RebootHandoffTests(unittest.TestCase):
         terminal_start = actual.index('bool IsTerminalResult(')
         terminal_end = actual.index('RunResult ToRunResult(', terminal_start)
         loop = scaffold[scaffold.index('RunResult RunLoop(bool fastboot,'):scaffold.index('void StartAeraUiEarly(')]
+        # The mocked display is ready immediately; its UI lifetime below still
+        # waits for the driver's action, independently of backend startup.
+        loop = loop.replace('    for (;;) {', '    NotifyEarlyDisplayReady();\n    for (;;) {', 1)
         functions = actual[actual.index('static RunResult RunInlineUi('):]
         (source / 'aeraui/core/runner.cpp').write_text(
             prefix + actual[globals_start:globals_end] + '\n' +

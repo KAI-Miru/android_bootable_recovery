@@ -53,8 +53,9 @@ struct DisplayMetrics {
     }
 };
 
-// Starts the native renderer while the recovery core continues partition and
-// decryption setup. Must be called after gr_init() and ev_init().
+// Starts the native renderer after gr_init() and ev_init(). Waits for initial
+// display/provider setup (or failure) before the backend may overlay /vendor;
+// partition and decryption setup then continue alongside the UI loop.
 void StartAeraUiEarly(const DisplayMetrics& metrics = {});
 
 // Displays AERA's native credential page and blocks recovery startup until

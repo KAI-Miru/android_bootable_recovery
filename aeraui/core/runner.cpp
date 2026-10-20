@@ -196,6 +196,7 @@ std::condition_variable gDecryptCondition;
 std::thread gEarlyThread;
 bool gEarlyStarted = false;
 bool gEarlyFinished = false;
+bool gEarlyDisplayReady = false;
 bool gDecryptResolved = false;
 DecryptionResult gDecryptResult = DecryptionResult::kUnavailable;
 RunResult gEarlyResult = RunResult::kUnexpectedExit;
@@ -458,6 +459,14 @@ bool IsTerminalResult(RunResult result) {
     }
 }
 
+void NotifyEarlyDisplayReady() {
+    {
+        std::lock_guard<std::mutex> lock(gEarlyMutex);
+        gEarlyDisplayReady = true;
+    }
+    gEarlyCondition.notify_all();
+}
+
 RunResult ToRunResult(Action action) {
     switch (action) {
         case Action::kRebootSystem: return RunResult::kRebootSystem;
@@ -499,6 +508,7 @@ RunResult RunLoop(bool fastboot_mode = false,
     if (!engine.Initialize(fastboot_mode, metrics.adaptive_resolution,
                            metrics.logical_height, resume_recovery))
         return RunResult::kEngineFailure;
+    NotifyEarlyDisplayReady();
     aeraScreenTimer.Wake();
 
     struct ModeStateGuard {
@@ -745,8 +755,12 @@ static RunResult RunInlineUi(bool fastboot, const DisplayMetrics& metrics,
 }
 
 void StartAeraUiEarly(const DisplayMetrics& metrics) {
-    std::lock_guard<std::mutex> lock(gEarlyMutex);
-    if (gEarlyStarted || IsTerminalResult(gEarlyResult)) return;
+    std::unique_lock<std::mutex> lock(gEarlyMutex);
+    if (IsTerminalResult(gEarlyResult)) return;
+    if (gEarlyStarted) {
+        gEarlyCondition.wait(lock, [] { return gEarlyDisplayReady || gEarlyFinished; });
+        return;
+    }
 
     gBackendReady.store(false, std::memory_order_release);
     gDecryptRequested.store(false, std::memory_order_release);
@@ -757,6 +771,7 @@ void StartAeraUiEarly(const DisplayMetrics& metrics) {
     }
     gEarlyResult = RunResult::kUnexpectedExit;
     gEarlyFinished = false;
+    gEarlyDisplayReady = false;
     gDisplayMetrics = metrics;
     gEarlyStarted = true;
     gEarlyThread = std::thread([] {
@@ -799,6 +814,12 @@ void StartAeraUiEarly(const DisplayMetrics& metrics) {
             for (;;) pause();
         }
     });
+    // The backend can temporarily mount installed /vendor as soon as gui_init
+    // returns. Finish loading graphics providers first, while the ramdisk's
+    // paths are still visible, or recovery itself can pin that dynamic mount
+    // and prevent a later fastbootd handoff. A failed initialization also
+    // releases startup through gEarlyFinished; no backend/decryption wait here.
+    gEarlyCondition.wait(lock, [] { return gEarlyDisplayReady || gEarlyFinished; });
 }
 
 DecryptionResult RunAeraUiDecryption(int credential_type,
