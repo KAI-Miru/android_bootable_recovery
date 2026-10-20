@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #pragma once
+#include "../../../aera_wlan_ip.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -317,7 +318,20 @@ enum class InterfaceSize {
 };
 InterfaceSize RecoveryInterfaceSize();
 bool RecoverySetInterfaceSize(InterfaceSize size);
-enum class KeyboardLayout { kQwerty = 0, kQwertz = 1 };
+enum class KeyboardLayout { kQwerty = 0, kQwertz = 1, kAzerty = 2 };
+inline const char *KeyboardLayoutCode(KeyboardLayout layout) {
+  switch (layout) {
+    case KeyboardLayout::kQwerty: return "qwerty";
+    case KeyboardLayout::kQwertz: return "qwertz";
+    case KeyboardLayout::kAzerty: return "azerty";
+  }
+  return nullptr;
+}
+inline KeyboardLayout KeyboardLayoutFromCode(const std::string &code) {
+  if (code == "qwertz") return KeyboardLayout::kQwertz;
+  if (code == "azerty") return KeyboardLayout::kAzerty;
+  return KeyboardLayout::kQwerty;
+}
 KeyboardLayout RecoveryKeyboardLayout();
 bool RecoverySetKeyboardLayout(KeyboardLayout layout);
 std::vector<HomePluginPreference> RecoveryHomePluginLayout();
@@ -468,13 +482,17 @@ enum class WifiOperation {
   kDisableAdb,
   kEnableFastbootWifi,
   kDisableFastbootWifi,
+  kSaveIpConfig,
 };
+using WifiIpConfig = aera::wifi::IpConfig;
 struct WifiRequest {
   WifiOperation operation = WifiOperation::kScan;
   std::string ssid;
   std::string password;
   bool use_saved_credentials = false;
+  WifiIpConfig ip_config;
 };
+WifiIpConfig RecoveryWifiIpConfig(const std::string &ssid);
 void RecoveryWifiInitialize();
 void RecoveryWifiInitializeEarly();
 WifiConnection RecoveryWifiConnection();

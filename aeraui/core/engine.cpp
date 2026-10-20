@@ -39,6 +39,9 @@
 #include "scene.hpp"
 #include "ui_components.hpp"
 #include "pc_transfer_banner.hpp"
+#include "plugin_activity_banner.hpp"
+#include "plugin_api/runtime.hpp"
+#include "plugins/console_commands.hpp"
 #include "update/update_manager.hpp"
 #include "root/root_manager.hpp"
 #include "../components/power_transition.hpp"
@@ -77,6 +80,7 @@ enum class PluginTask {
   kInteractive,
   kBackgroundRefresh,
   kAutomaticInstall,
+  kPcInstall,
 };
 
 uint32_t MonotonicMilliseconds() {
@@ -408,6 +412,7 @@ public:
     if (update_thread_.joinable())
       update_thread_.join();
     ShutdownWebRuntime();
+    ShutdownGenericPluginRuntimes();
     CancelEdgeSwipe();
     lv_anim_delete(this, SetRecentLaunchProgress);
     recent_launch_active_ = false;
@@ -435,6 +440,7 @@ public:
     pointer_device_ = nullptr;
     }
     pc_transfer_.Clear();
+    plugin_activity_.Clear();
     if (display_ != nullptr) {
       lv_display_delete(display_);
       display_ = nullptr;
@@ -468,6 +474,7 @@ public:
     plugin_running_ = false;
     plugin_task_ = PluginTask::kNone;
     plugin_auto_queue_.clear();
+    console_commands_ready_ = false;
     plugin_connection_seen_ = false;
     update_running_ = false;
     update_task_ = UpdateTask::kNone;
@@ -609,7 +616,14 @@ public:
       const plugins::Job completed_job = plugin_job_;
       plugin_running_ = false;
       plugin_task_ = PluginTask::kNone;
-      if (completed == PluginTask::kInteractive) {
+      if (completed == PluginTask::kPcInstall) {
+        aera::pc::UpdateInstall(plugin_progress_.value.load(), message, message);
+        aera::pc::CompleteInstall(pc_job_id_, success ? 0 : 1);
+        pc_job_id_.clear();
+        if (current_scene_ == Action::kPlugins)
+          CompletePluginOperation(plugin_scene_, success, message.c_str());
+        else RefreshPluginSurfaces();
+      } else if (completed == PluginTask::kInteractive) {
         if (current_scene_ == Action::kPlugins) {
           CompletePluginOperation(plugin_scene_, success, message.c_str());
           if (success && completed_job == plugins::Job::kRefresh &&
@@ -631,7 +645,7 @@ public:
       }
     }
     if (plugin_running_ && (plugin_task_ == PluginTask::kInteractive ||
-        plugin_task_ == PluginTask::kAutomaticInstall) &&
+        plugin_task_ == PluginTask::kAutomaticInstall || plugin_task_ == PluginTask::kPcInstall) &&
         current_scene_ == Action::kPlugins &&
         MonotonicMilliseconds() - last_plugin_update_ >= 120) {
       last_plugin_update_ = MonotonicMilliseconds();
@@ -675,6 +689,16 @@ public:
     }
     PollAutomaticUpdates();
     PollPcConnection();
+    PollGenericPluginRuntimes();
+    if (backend_ready_ && !decryption_active_ && !decrypt_running_ &&
+        !fastboot_mode_ && !console_commands_ready_) {
+      plugins::RefreshConsoleCommands();
+      console_commands_ready_ = true;
+    }
+    plugin_activity_.Refresh(!suspended_ && !lock_overlay_ && !power_overlay_ &&
+        !operation_running_ && !decryption_active_ && !fastboot_mode_ &&
+        !pc_transfer_.Expanded() && !StatusBarShadeOpen(), HandleSceneAction, this,
+        aera::pc::GetUploadProgress().active ? 148 : 0);
     PollAutomaticNas();
     if (backend_ready_ && !fastboot_mode_ && CanReboot())
       RecoveryPollDeveloperSettings();
@@ -708,6 +732,7 @@ public:
   }
 
   void NavigateHome() {
+    plugin_activity_.Close();
     if (pc_transfer_.Expanded()) {
       pc_transfer_.Close();
       pc_transfer_.Refresh(aera::pc::GetUploadProgress());
@@ -736,6 +761,10 @@ public:
   }
 
   void NavigateBack(bool feedback = true) {
+    if (plugin_activity_.Expanded()) {
+      if (!widgets::DismissModal(lv_layer_top())) plugin_activity_.Close();
+      return;
+    }
     if (pc_transfer_.Expanded()) {
       pc_transfer_.Close();
       pc_transfer_.Refresh(aera::pc::GetUploadProgress());
@@ -1168,7 +1197,7 @@ public:
 
   bool CanReboot() const {
     return !operation_running_ && !nas_running_ && !plugin_running_ && !decrypt_running_ &&
-        !aera::backup::Operations().Active();
+        !aera::backup::Operations().Active() && !plugin_api::PluginStorageBusy();
   }
   bool NeedsWake() const {
     return wake_requested_ || (operation_visible_ && (operation_complete_.load(std::memory_order_acquire) ||
@@ -1847,6 +1876,7 @@ private:
   void ShowRecents(bool gesture_transition = false) {
     if (recents_overlay_ != nullptr || fastboot_mode_ || !backend_ready_)
       return;
+    plugin_activity_.Close();
     pointer_.pressed = false;
     recents_deferred_cards_.clear();
     recents_all_cards_.clear();
@@ -1955,12 +1985,16 @@ private:
     if (has_recents) {
       auto *clear = widgets::Button(actions, LV_SYMBOL_TRASH "  Clear all",
                                     [this] {
-        recent_apps_.clear();
-        // Browser is the one app runtime intentionally kept alive between
-        // scenes. Other app workers are owned by their scene and stop when
-        // ShowHome replaces that scene.
-        ShutdownWebRuntime();
-        ShowHome();
+        auto close_all = [this] {
+          recent_apps_.clear();
+          ShutdownGenericPluginRuntimes();
+          ShutdownWebRuntime();
+          ShowHome(false);
+        };
+        if (plugin_api::PluginStorageBusy()) {
+          widgets::Sheet(recents_overlay_, "Background tasks",
+              "The plugin will be terminated. Files or operations may be incomplete.", close_all);
+        } else close_all();
       });
       lv_obj_set_size(clear, action_width, action_height);
       lv_obj_align(clear, LV_ALIGN_RIGHT_MID, landscape ? -10 : -12, 0);
@@ -2422,6 +2456,7 @@ private:
         recents_swipe_last_y_ < recents_swipe_start_y_;
     const bool open_recents = accepted && recents_swipe_hold_committed_;
     const bool go_home = accepted && !open_recents;
+    if (accepted) plugin_activity_.Close();
     recents_swipe_active_ = false;
     recents_swipe_max_up_ = 0;
     recents_swipe_hold_started_ms_ = 0;
@@ -2434,7 +2469,7 @@ private:
       recents_swipe_hold_committed_ = false;
       recents_transition_active_ = false;
       if (open_recents && recents_overlay_ == nullptr) ShowRecents(false);
-      else if (go_home && !on_home_) ShowHome();
+      else if (go_home) NavigateHome();
       return;
     }
 
@@ -3007,10 +3042,18 @@ private:
       return;
     }
 
+    if ((action == Action::kRebootSystem || action == Action::kRebootRecovery ||
+         action == Action::kRebootBootloader || action == Action::kRebootFastbootd ||
+         action == Action::kPowerOff) && !self->CanReboot()) {
+      widgets::Sheet(lv_screen_active(), "Background tasks",
+          "Finish or cancel background plugin storage tasks first.");
+      return;
+    }
     self->pending_action_ = action;
   }
 
   void ShowHome(bool capture_current = true, bool mode_transition = false) {
+    plugin_activity_.Close();
     if (capture_current && IsRecentAppAction(current_scene_))
       CaptureRecentPreview(current_scene_);
     CancelEdgeSwipe();
@@ -3150,6 +3193,8 @@ private:
       if (aera::pc::TakePromptAnswer(&id, &accepted) && prompt.active && prompt.id == id)
         RecoveryAnswerInstallerPrompt(accepted);
     }
+    if (!pc_job_id_.empty() && plugin_running_ && plugin_task_ == PluginTask::kPcInstall)
+      aera::pc::UpdateInstall(plugin_progress_.value.load(), "Verifying and installing plugin", "");
     bool pc_busy = !interactive_ready_ || decryption_active_ || decrypt_running_ ||
         operation_running_ || wifi_running_ || nas_running_ || plugin_running_ ||
         update_running_ || fastboot_mode_ || power_overlay_ ||
@@ -3184,7 +3229,7 @@ private:
       HandleSceneAction(action, this);
       return;
     }
-    if (!pc_overlay_ && !PcBlockedByModal() &&
+    if (!pc_overlay_ && !PcBlockedByModal() && !plugin_api::PluginStorageBusy() &&
         (!lock_overlay_ || !RecoveryScreenLockEnabled()) &&
         aera::pc::TakeInstallRequest(&install) && aera::pc::BeginInstall(install.id)) {
       // A browser-confirmed job replaces the idle swipe lock, never decryption.
@@ -3193,6 +3238,12 @@ private:
         lv_obj_delete(lock);
       }
       pc_job_id_ = install.id;
+      if (install.plugin_install) {
+        StopGenericPluginRuntime(install.plugin.id);
+        HandleSceneAction(Action::kPlugins, this);
+        StartPlugin(install.plugin, PluginTask::kPcInstall);
+        return;
+      }
       SetJobRequest(install.job);
       HandleSceneAction(Action::kRunOperation, this);
     }
@@ -3269,6 +3320,11 @@ private:
   void StartJob(const JobRequest &request) {
     if (operation_running_ || wifi_running_ || nas_running_ || plugin_running_)
       return;
+    if (plugin_api::PluginStorageBusy()) {
+      widgets::Sheet(lv_screen_active(), "Background tasks",
+          "Finish or cancel background plugin storage tasks first.");
+      return;
+    }
     DismissPowerMenu();
     operation_visible_ = request.show_on_device;
     operation_started_ms_ = MonotonicMilliseconds();
@@ -3368,7 +3424,9 @@ private:
                    PluginTask task = PluginTask::kInteractive) {
     if (plugin_running_ || operation_running_ || wifi_running_ || nas_running_)
       return;
-    if ((task == PluginTask::kInteractive || task == PluginTask::kAutomaticInstall) &&
+    if (request.job == plugins::Job::kRemove)
+      StopGenericPluginRuntime(request.id);
+    if ((task == PluginTask::kInteractive || task == PluginTask::kAutomaticInstall || task == PluginTask::kPcInstall) &&
         current_scene_ == Action::kPlugins)
       SetPluginBusy(plugin_scene_, request);
     plugin_progress_.value.store(0);
@@ -3993,6 +4051,7 @@ private:
   lv_obj_t *notice_overlay_ = nullptr;
   lv_obj_t *pc_overlay_ = nullptr;
   widgets::PcTransferBanner pc_transfer_;
+  widgets::PluginActivityBanner plugin_activity_;
   std::string pc_connection_id_, pc_job_id_;
   uint32_t last_pc_poll_ = 0, last_pc_platform_refresh_ = 0, last_pc_cleanup_ = 0;
   uint32_t last_pc_start_attempt_ = 0;
@@ -4093,6 +4152,7 @@ private:
   void *wifi_report_state_ = nullptr;
   bool nas_running_ = false;
   bool plugin_running_ = false;
+  bool console_commands_ready_ = false;
   bool plugin_connection_seen_ = false;
   PluginTask plugin_task_ = PluginTask::kNone;
   plugins::Job plugin_job_ = plugins::Job::kRefresh;

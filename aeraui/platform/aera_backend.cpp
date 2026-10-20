@@ -1,6 +1,7 @@
 /* Copyright (C) 2026 AERA Recovery Project contributors
  * SPDX-License-Identifier: Apache-2.0 */
 #include <aeraui/backend.hpp>
+#include "aeraui/features/plugin_api/activity.hpp"
 #include <aeraui/screen_timeout.hpp>
 #include "../../aera_remote/backup_cancel.hpp"
 #include "aeraui/features/update/payload_inspector.hpp"
@@ -1173,6 +1174,11 @@ payload::FlashProgressStore gPayloadProgress;
 PayloadFlashProgress RecoveryPayloadFlashProgress() { return gPayloadProgress.Read(); }
 static int RecoveryRunJobImpl(const JobRequest &request);
 int RecoveryRunJob(const JobRequest &request) {
+  plugin_api::HostStorageLease storage_lease;
+  if (!storage_lease) {
+    gui_err("Finish or cancel background plugin storage tasks first.\n");
+    return 1;
+  }
   const char *method = request.job == Job::kInstall ? "ZIP installation" :
       request.job == Job::kSideload ? "ADB sideload" :
       request.job == Job::kFlashPayload ? "Advanced payload flash" :
@@ -2319,15 +2325,11 @@ bool RecoverySetInterfaceSize(InterfaceSize size) {
 }
 KeyboardLayout RecoveryKeyboardLayout() {
   LoadAeraPreferencesIfAvailable();
-  return DataManager::GetStrValue("aera_keyboard_layout") == "qwertz"
-      ? KeyboardLayout::kQwertz : KeyboardLayout::kQwerty;
+  return KeyboardLayoutFromCode(DataManager::GetStrValue("aera_keyboard_layout"));
 }
 bool RecoverySetKeyboardLayout(KeyboardLayout layout) {
-  if (layout != KeyboardLayout::kQwerty &&
-      layout != KeyboardLayout::kQwertz) return false;
-  return DataManager::SetValue(
-      "aera_keyboard_layout",
-      layout == KeyboardLayout::kQwertz ? "qwertz" : "qwerty", 1) == 0;
+  const char *code = KeyboardLayoutCode(layout);
+  return code && DataManager::SetValue("aera_keyboard_layout", code, 1) == 0;
 }
 int RecoveryHomeGridColumns() {
   LoadAeraPreferencesIfAvailable();
@@ -2770,8 +2772,8 @@ EarlyUiPreferences CaptureCurrentEarlyUiPreferences() {
       interface_size.empty() ? 1 : std::clamp(atoi(interface_size.c_str()), 0, 3);
   preferences.language = DataManager::GetStrValue("tw_language");
   if (!ValidLanguage(preferences.language)) preferences.language = AERA_DEFAULT_LANGUAGE;
-  preferences.keyboard_layout =
-      DataManager::GetStrValue("aera_keyboard_layout") == "qwertz" ? "qwertz" : "qwerty";
+  preferences.keyboard_layout = KeyboardLayoutCode(KeyboardLayoutFromCode(
+      DataManager::GetStrValue("aera_keyboard_layout")));
   const int home_grid_columns =
       DataManager::GetIntValue("aera_home_grid_columns");
   preferences.home_grid_columns =
@@ -2981,7 +2983,7 @@ bool SetEarlyUiValue(EarlyUiPreferences* preferences, const std::string& key,
     if (!ValidLanguage(value)) return false;
     preferences->language = value;
   } else if (key == "keyboard_layout") {
-    if (value != "qwerty" && value != "qwertz") return false;
+    if (value != KeyboardLayoutCode(KeyboardLayoutFromCode(value))) return false;
     preferences->keyboard_layout = value;
   } else if (key == "home_grid_columns") {
     if (!ParseInteger(value, 2, 5, &parsed)) return false;
@@ -3432,8 +3434,7 @@ bool SaveAeraPreferences(bool require_early) {
          << "themed_home_icons=" << (RecoveryThemedHomeIcons() ? 1 : 0) << '\n'
          << "interface_size=" << static_cast<int>(RecoveryInterfaceSize()) << '\n'
          << "keyboard_layout="
-         << (RecoveryKeyboardLayout() == KeyboardLayout::kQwertz
-                 ? "qwertz" : "qwerty") << '\n'
+         << KeyboardLayoutCode(RecoveryKeyboardLayout()) << '\n'
          << "home_grid_columns=" << RecoveryHomeGridColumns() << '\n'
          << "dock_layout=" << DataManager::GetIntValue("aera_dock_layout") << '\n'
          << "dock_transparency=" << RecoveryDockTransparency() << '\n'
@@ -3797,6 +3798,16 @@ WifiStatus RecoveryWifiStatus() {
   return status;
 }
 
+WifiIpConfig RecoveryWifiIpConfig(const std::string &ssid) {
+  WifiIpConfig config;
+#ifdef OF_ENABLE_WLAN
+  AeraSecrets::GetWlanIpConfig(ssid, config);
+#else
+  (void)ssid;
+#endif
+  return config;
+}
+
 int RecoveryRunWifi(const WifiRequest &request) {
 #ifndef OF_ENABLE_WLAN
   (void)request;
@@ -3804,6 +3815,14 @@ int RecoveryRunWifi(const WifiRequest &request) {
 #else
   bool result = false;
   switch (request.operation) {
+    case WifiOperation::kSaveIpConfig:
+      result = !RecoveryDataLocked() && AeraSecrets::SetWlanIpConfig(request.ssid, request.ip_config);
+      if (result && RecoveryWifiConnection().connected &&
+          RecoveryWifiConnection().ssid == request.ssid) {
+        result = Wlan::ApplyIpConfiguration(request.ssid);
+      }
+      if (result) SaveAeraPreferences();
+      break;
     case WifiOperation::kEnable:
       DataManager::SetValue("wlan_state", "enabling");
       result = Wlan::Enable();
@@ -4269,6 +4288,11 @@ bool RecoveryImportNasKey(const std::string &key, const std::string &name,
 }
 
 int RecoveryRunNas(const NasRequest &request) {
+  plugin_api::HostStorageLease storage_lease;
+  if (!storage_lease) {
+    gui_err("Finish or cancel background plugin storage tasks first.\n");
+    return 1;
+  }
 #ifndef OF_ENABLE_WLAN
   (void)request;
   return 1;

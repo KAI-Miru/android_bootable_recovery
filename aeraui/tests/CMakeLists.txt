@@ -16,7 +16,8 @@ find_package(JPEG REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)
 target_link_libraries(lvgl PUBLIC Freetype::Freetype)
-add_executable(ui_check ui_check.cpp
+add_executable(ui_check ui_check.cpp plugin_runtime_ui_test.cpp
+  ../features/plugin_api/session.cpp ../features/plugin_api/activity.cpp
   ../scenes/developer_scene.cpp
   ../features/developer/kernel_settings.cpp
   ../scenes/reboot_scene.cpp ../components/power_transition.cpp
@@ -51,6 +52,10 @@ target_link_libraries(ui_check PRIVATE lvgl PNG::PNG JPEG::JPEG Threads::Threads
 enable_testing()
 add_test(NAME filesystem_format_ui COMMAND ui_check --filesystem-format)
 add_test(NAME fastbootd_menu_ui COMMAND ui_check --fastbootd-menu)
+add_executable(wifi_ip_config_test wifi_ip_config_test.cpp)
+target_compile_options(wifi_ip_config_test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_test(NAME wifi_static_ip_validation COMMAND wifi_ip_config_test)
+add_test(NAME wifi_ip_settings_ui COMMAND ui_check --wifi-ip)
 add_executable(artillery_test artillery_test.cpp ../features/artillery/game.cpp)
 target_compile_options(artillery_test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_test(NAME artillery_physics_and_unlock COMMAND artillery_test)
@@ -163,6 +168,19 @@ target_include_directories(plugin_api_session_test PRIVATE ..
   ../features)
 target_compile_options(plugin_api_session_test PRIVATE -UNDEBUG)
 add_test(NAME plugin_api_negotiation_and_limits COMMAND plugin_api_session_test)
+add_executable(plugin_descriptor_test plugin_descriptor_test.cpp)
+target_compile_options(plugin_descriptor_test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_test(NAME plugin_descriptor_kernel_compatibility COMMAND plugin_descriptor_test)
+add_executable(console_command_test console_command_test.cpp ../features/plugins/console_commands.cpp)
+target_compile_options(console_command_test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_test(NAME plugin_console_command_registry COMMAND console_command_test)
+add_executable(plugin_activity_test plugin_activity_test.cpp
+  ../features/plugin_api/activity.cpp)
+target_include_directories(plugin_activity_test PRIVATE ../features)
+target_compile_options(plugin_activity_test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(plugin_activity_test PRIVATE Threads::Threads)
+add_test(NAME plugin_background_storage_claims COMMAND plugin_activity_test)
+add_test(NAME plugin_background_view_lifetime COMMAND ui_check --plugin-runtime)
 add_executable(sideload_ui_test sideload_ui_test.cpp
   ../localization/fonts/aera_fallback.cpp ../localization/i18n.cpp
   ../localization/catalog/catalog_generated.cpp
@@ -306,6 +324,12 @@ add_test(NAME native_catalog_round_trip COMMAND catalog_test
 add_test(NAME native_catalog_english_only COMMAND catalog_english_test
   "${CMAKE_CURRENT_SOURCE_DIR}/../localization/catalog/catalog.json")
 
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME chinese_catalog_coverage COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/chinese_catalog_test.py")
+endif()
+
 add_executable(plugin_store_test plugin_store_test.cpp ../scenes/plugin_scene.cpp
   ../features/plugins/store_metadata.cpp ../components/retroarch_icon.cpp
   ../components/text_edit.cpp ../localization/fonts/aera_fallback.cpp
@@ -329,6 +353,7 @@ add_test(NAME touch_single_axis_retention COMMAND touch_input_test single)
 add_test(NAME touch_legacy_release_retention COMMAND touch_input_test legacy)
 
 add_executable(status_gesture_test status_gesture_test.cpp
+  ../features/plugin_api/activity.cpp
   ../components/text_edit.cpp
   ../localization/fonts/aera_fallback.cpp ../localization/i18n.cpp
   ../localization/catalog/catalog.cpp ../localization/catalog/catalog_generated.cpp)

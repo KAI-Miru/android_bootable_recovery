@@ -172,8 +172,7 @@ bool RecoverySetInterfaceSize(InterfaceSize size) {
 }
 KeyboardLayout RecoveryKeyboardLayout() { return KeyboardLayout::kQwerty; }
 bool RecoverySetKeyboardLayout(KeyboardLayout layout) {
-  return layout == KeyboardLayout::kQwerty ||
-         layout == KeyboardLayout::kQwertz;
+  return KeyboardLayoutCode(layout) != nullptr;
 }
 static int home_grid_columns = 3;
 static std::vector<HomePluginPreference> home_layout;
@@ -410,6 +409,7 @@ WifiStatus RecoveryWifiStatus() {
   return status;
 }
 int RecoveryRunWifi(const WifiRequest &request) { wifi_request = request; return 0; }
+WifiIpConfig RecoveryWifiIpConfig(const std::string &) { return {}; }
 bool RecoveryWifiAutoEnable() { return wifi_auto_enable; }
 bool RecoveryWifiAutoConnect() { return wifi_auto_connect; }
 bool RecoverySetWifiAutoEnable(bool enabled) { wifi_auto_enable = enabled; return true; }
@@ -492,7 +492,7 @@ std::vector<AdbPairedDevice> RecoveryAdbPairedDevices() {
 bool RecoveryForgetAdbDevice(const std::string &) { return true; }
 static plugins::Request selected_plugin_request;
 void SetPluginRequest(const plugins::Request &request) { selected_plugin_request = request; }
-void SetSelectedPluginId(const std::string &) {}
+void TestPluginRuntime(lv_obj_t *screen);
 }
 namespace aeraui::plugins {
 std::vector<Plugin> Installed() { return home_plugins; }
@@ -633,6 +633,7 @@ static void AssertVisibleCaret(lv_obj_t *input) {
   assert(lv_obj_get_style_border_side(input, LV_PART_CURSOR) == LV_BORDER_SIDE_LEFT);
   assert(lv_obj_get_style_anim_duration(input, LV_PART_CURSOR) > 0);
 }
+#include "gpu_context.hpp"
 int main(int argc,char **argv) {
   assert(argc==2);
   char fixture_dir[]="/tmp/aera-restore-test-XXXXXX"; assert(mkdtemp(fixture_dir));
@@ -652,6 +653,7 @@ int main(int argc,char **argv) {
         << std::string(160 * 1024, 'x');
   }
   std::filesystem::create_directory(backup_root+"/AERA-test-backup");
+  gpu_test::Initialize();
   lv_init();
   i18n::Initialize("en");
   const lv_font_t *latin_font = design::UiFont(&lv_font_montserrat_32);
@@ -662,11 +664,17 @@ int main(int argc,char **argv) {
     assert(glyph.adv_w > 0);
   }
   std::vector<uint8_t> frame(1440*3168*4);
-  auto *display=lv_display_create(1440,3168);
-  lv_display_set_buffers(display,frame.data(),nullptr,frame.size(),LV_DISPLAY_RENDER_MODE_DIRECT);
-  lv_display_set_flush_cb(display,[](lv_display_t *d,const lv_area_t *,uint8_t *){lv_display_flush_ready(d);});
+  auto *display = gpu_test::enabled ? lv_opengles_texture_create(1440, 3168)
+                                    : lv_display_create(1440,3168);
+  if (gpu_test::enabled) lv_display_set_flush_cb(display, gpu_test::Flush);
+  else {
+    lv_display_set_buffers(display,frame.data(),nullptr,frame.size(),LV_DISPLAY_RENDER_MODE_DIRECT);
+    lv_display_set_flush_cb(display,[](lv_display_t *d,const lv_area_t *,uint8_t *){lv_display_flush_ready(d);});
+  }
   auto save=[&](const char *path, int ticks = 40) {
-    Tick(ticks); png_image image{}; image.version=PNG_IMAGE_VERSION;
+    Tick(ticks);
+    if (gpu_test::enabled) glReadPixels(0, 0, 1440, 3168, GL_RGBA, GL_UNSIGNED_BYTE, frame.data());
+    png_image image{}; image.version=PNG_IMAGE_VERSION;
     image.width=lv_display_get_horizontal_resolution(display);
     image.height=lv_display_get_vertical_resolution(display);
     image.format=PNG_FORMAT_BGRA;
@@ -864,7 +872,50 @@ int main(int argc,char **argv) {
     lv_indev_delete(input); lv_obj_delete(slide);
     puts("Direct PIN/pattern/password bouncers, unsupported-device gating and English/Chinese layouts passed.");
     return 0;
-  } else if (!strcmp(argv[1], "--artillery")) {
+  }
+  if (!strcmp(argv[1], "--wifi-ip")) {
+    auto *wifi = lv_obj_create(nullptr); BuildWifiScene(wifi, RecordAction, nullptr);
+    lv_screen_load(wifi); Tick(2);
+    lv_obj_send_event(Find(wifi, "Saved network"), LV_EVENT_CLICKED, nullptr);
+    lv_obj_send_event(Find(wifi, "IP settings"), LV_EVENT_CLICKED, nullptr); Tick(2);
+    auto *mode = Find(wifi, "Static IP"); assert(mode);
+    lv_obj_send_event(mode, LV_EVENT_CLICKED, nullptr); Tick(2);
+    assert(Find(wifi, "IP address") && Find(wifi, "Subnet mask / prefix"));
+    auto *page = lv_obj_get_parent(lv_obj_get_parent(mode));
+    auto *save_button = Find(page, "Save"); assert(save_button);
+    const int callbacks = callback_count;
+    lv_obj_send_event(save_button, LV_EVENT_CLICKED, nullptr);
+    assert(callback_count == callbacks); // Invalid input never starts a worker.
+    assert(Find(wifi, "Enter a valid IPv4 address."));
+    lv_obj_send_event(Find(page, "Not set"), LV_EVENT_CLICKED, nullptr); Tick(2);
+    auto *field = FindType(page, &lv_textarea_class); assert(field);
+    auto *ip_keyboard = FindType(page, &lv_keyboard_class); assert(ip_keyboard);
+    assert(lv_keyboard_get_mode(ip_keyboard) == LV_KEYBOARD_MODE_NUMBER);
+    assert(!strcmp(lv_buttonmatrix_get_button_text(ip_keyboard, 11), LV_SYMBOL_BACKSPACE));
+    assert(lv_color_eq(lv_obj_get_style_text_color(field, LV_PART_MAIN), design::kText));
+    lv_area_t field_bounds; lv_obj_get_coords(field, &field_bounds);
+    assert(field_bounds.y1 > 3168 / 2);
+    lv_textarea_set_text(field, "192.168.178.50");
+    save("/tmp/aera-wifi-ip-keyboard.png", 2);
+    lv_obj_send_event(Find(page, "Done"), LV_EVENT_CLICKED, nullptr); Tick(2);
+    assert(Find(page, "192.168.178.50"));
+    save("/tmp/aera-wifi-ip.png", 2);
+    lv_obj_send_event(Find(page, "Automatic (DHCP)"), LV_EVENT_CLICKED, nullptr);
+    lv_obj_send_event(save_button, LV_EVENT_CLICKED, nullptr);
+    assert(last_action == Action::kRunWifiOperation);
+    assert(GetWifiRequest().operation == WifiOperation::kSaveIpConfig);
+    assert(!GetWifiRequest().ip_config.manual && GetWifiRequest().ssid == "Saved network");
+    lv_screen_load(screen); lv_obj_delete(wifi);
+    std::filesystem::remove_all(backup_root);
+    return 0;
+  }
+  if (!strcmp(argv[1], "--plugin-runtime")) {
+    TestPluginRuntime(screen);
+    save("/tmp/aera-plugin-activity.png", 2);
+    std::filesystem::remove_all(backup_root);
+    return 0;
+  }
+  if (!strcmp(argv[1], "--artillery")) {
     for (bool landscape : {false, true}) {
       const int width = landscape ? 3168 : 1440;
       const int height = landscape ? 1440 : 3168;
