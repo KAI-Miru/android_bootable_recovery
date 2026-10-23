@@ -50,6 +50,7 @@ LOCAL_SRC_FILES := \
     startupArgs.cpp \
     twrp-functions.cpp \
     aera_core.cpp \
+    aera_persist_sfs.cpp \
     aera_flash_log.cpp \
     aera_flash_log_platform.cpp \
     twrpDigestDriver.cpp \
