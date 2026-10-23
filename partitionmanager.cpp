@@ -127,6 +127,7 @@ extern "C" {
 	#include "cryptfs.h"
 	#include "fscrypt-common.h"	
 	#include "MetadataCrypt.h"
+	#include "aera_checkpoint/checkpoint.hpp"
 	#endif
 #endif
 #endif
@@ -1052,7 +1053,11 @@ void TWPartitionManager::Decrypt_Data() {
 #ifdef USE_FSCRYPT
 			std::vector<std::string> user_devices;
 			std::vector<bool> device_aliased;
-			if (android::vold::fscrypt_mount_metadata_encrypted(Decrypt_Data->Actual_Block_Device, Decrypt_Data->Mount_Point, false, false, Decrypt_Data->Current_File_System, false, user_devices, device_aliased, 0, TWFunc::Path_Exists(additional_fstab) ? additional_fstab : "")) {
+			const bool metadata_ready = [&] {
+				const aera::MetadataCheckpointScope checkpoint_scope;
+				return android::vold::fscrypt_mount_metadata_encrypted(Decrypt_Data->Actual_Block_Device, Decrypt_Data->Mount_Point, false, false, Decrypt_Data->Current_File_System, false, user_devices, device_aliased, 0, TWFunc::Path_Exists(additional_fstab) ? additional_fstab : "");
+			}();
+			if (metadata_ready) {
 				std::string crypto_blkdev = android::base::GetProperty("ro.crypto.fs_crypto_blkdev", "error");
 				Decrypt_Data->Decrypted_Block_Device = crypto_blkdev;
 				LOGINFO("Successfully decrypted metadata encrypted data partition with new block device: '%s'\n", crypto_blkdev.c_str());

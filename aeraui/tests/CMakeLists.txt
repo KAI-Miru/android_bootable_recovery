@@ -463,7 +463,7 @@ target_compile_definitions(frp_wipe_enabled_test PRIVATE AERA_ENABLE_FRP_WIPE=1)
 
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
-  foreach(test reboot_handoff early_graphics_startup fastbootd_capability recovery_staging native_buffer_library vendor_ui_mount screen_timer screen_wake screen_lock screen_preferences filesystem_format userdata_mapping persist_sfs keystore_startup stable_mac_firmware chinese_catalog)
+  foreach(test reboot_handoff early_graphics_startup fastbootd_capability recovery_staging native_buffer_library vendor_ui_mount screen_timer screen_wake screen_lock screen_preferences filesystem_format userdata_mapping persist_sfs keystore_startup stable_mac_firmware recovery_checkpoint chinese_catalog)
     add_test(NAME ${test} COMMAND "${Python3_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/${test}_test.py")
   endforeach()

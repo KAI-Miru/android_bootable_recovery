@@ -393,6 +393,9 @@ ifneq ($(TW_POST_DECRYPT_MODULES),)
 endif
 
 ifeq ($(TW_INCLUDE_CRYPTO), true)
+    # Recovery must not start an uncommitted OTA checkpoint for an unmarked slot.
+    LOCAL_SRC_FILES += aera_checkpoint/checkpoint.cpp
+    LOCAL_LDFLAGS += -Wl,--wrap=_ZN7android4vold18cp_needsCheckpointEv
     LOCAL_SRC_FILES += aeraui/platform/android_screen_metadata.cpp aeraui/platform/android_screen_verifier.cpp
     LOCAL_CFLAGS += -DTW_INCLUDE_CRYPTO -DUSE_FSCRYPT -Wno-macro-redefined
     LOCAL_SHARED_LIBRARIES += libgpt_twrp

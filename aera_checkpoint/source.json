@@ -1,0 +1,22 @@
+{
+  "symbol": "_ZN7android4vold18cp_needsCheckpointEv",
+  "projects": [
+    {
+      "path": "system/vold",
+      "url": "https://github.com/AERA-Recovery/android_system_vold.git",
+      "commit": "36bb8ce4fbbb4615f3d87638347c59eface0853b",
+      "files": {
+        "Checkpoint.cpp": "adc86854121523abd5c03a87356b5c06bfd3b380696762f5fa15094d41f6ff0e",
+        "MetadataCrypt.cpp": "8ce03e960b849f39063d24afc558a0937d290c20e22a8ee3f6a535a785d6f5a8"
+      }
+    },
+    {
+      "path": "system/core",
+      "url": "https://github.com/AERA-Recovery/android_system_core.git",
+      "commit": "081c119b3e2182831f0d5b03e8b003279c9a7f13",
+      "files": {
+        "fs_mgr/fs_mgr.cpp": "3f08c36f4b2e5612e3d5faa70fba60106511a0aa0220b0493b60e955810cb63e"
+      }
+    }
+  ]
+}
