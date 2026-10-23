@@ -41,10 +41,9 @@
 #include <algorithm>
 #include <utility>
 #include "aera_filesystem_format.hpp"
+#include "aera_userdata_mapping.hpp"
 #include <android-base/properties.h>
 #include <libsnapshot/snapshot.h>
-#include <libdm/dm.h>
-#include <chrono>
 
 #include "cutils/properties.h"
 #include "libblkid/include/blkid.h"
@@ -2329,25 +2328,27 @@ bool TWPartition::Decrypt(string Password) {
 	return 1;
 }
 
-// A metadata-encryption mapping can hold userdata even after /data is unmounted.
-// Remove it synchronously; never format the underlying device while it survives.
-#ifdef TW_INCLUDE_CRYPTO
-static bool Release_Userdata_Mapping() {
-	auto& dm = android::dm::DeviceMapper::Instance();
-	std::vector<android::dm::DeviceMapper::DmBlockDevice> devices;
-	if (!dm.GetAvailableDevices(&devices))
-		return false;
-	const auto is_userdata = [](const auto& device) { return device.name() == "userdata"; };
-	if (std::none_of(devices.begin(), devices.end(), is_userdata))
+// Encryption removal formats the original block device. Ordinary filesystem
+// changes can intentionally format the decrypted mapping, which must survive.
+static bool Release_Userdata_Mapping(const string& mount_point,
+                                    bool preserve_decrypted_mapping) {
+	if (mount_point != "/data" || preserve_decrypted_mapping)
 		return true;
-	LOGINFO("Releasing userdata mapping before format.\n");
-	if (!dm.DeleteDevice("userdata", std::chrono::seconds(2)))
-		return false;
-	devices.clear();
-	return dm.GetAvailableDevices(&devices) &&
-		std::none_of(devices.begin(), devices.end(), is_userdata);
+	struct Operations {
+		aera::userdata_mapping::State GetState() const {
+			return aera::userdata_mapping::Probe("/dev/block/mapper/userdata");
+		}
+		int Remove(const char* command) const { return TWFunc::Exec_Cmd(command, false); }
+		void LogResult(const char* command, int result) const {
+			LOGINFO("AERA: %s returned %d before formatting.\n", command, result);
+		}
+		void Sleep(unsigned usec) const { usleep(usec); }
+	} operations;
+	if (aera::userdata_mapping::Release(operations))
+		return true;
+	LOGERR("AERA: userdata mapping removal failed or was not confirmed; refusing to format.\n");
+	return false;
 }
-#endif
 
 bool TWPartition::Wipe_Encryption(const string& filesystem) {
 	bool Save_Data_Media = Has_Data_Media;
@@ -2381,15 +2382,12 @@ bool TWPartition::Wipe_Encryption(const string& filesystem) {
 		return false;
 	}
 
-#ifdef TW_INCLUDE_CRYPTO
 	if (!UnMount(true))
-		return false;
-	if (Mount_Point == "/data" && !Release_Userdata_Mapping()) {
-		LOGERR("Unable to release userdata mapping; refusing to format.\n");
+		goto exit;
+	if (!Release_Userdata_Mapping(Mount_Point, false)) {
 		gui_msg(Msg(msg::kError, "unable_to_wipe=Unable to wipe {1}.")(Display_Name));
 		goto exit;
 	}
-#endif
 	Has_Data_Media = false;
 	Decrypted_Block_Device = "";
 	Is_Decrypted = false;
@@ -2502,6 +2500,9 @@ bool TWPartition::Wipe_EXTFS(string File_System) {
 		gui_msg(Msg(msg::kError, "unable_to_wipe=Unable to wipe {1}.")(Display_Name));
 		return false;
 	}
+	if (!Release_Userdata_Mapping(Mount_Point,
+	        Is_Decrypted && !Decrypted_Block_Device.empty()))
+		return false;
 
 	/**
 	 * On decrypted devices, IOCTL_Get_Block_Size calculates size on device mapper,
@@ -2597,6 +2598,9 @@ bool TWPartition::Wipe_EXT4() {
 		gui_msg(Msg(msg::kError, "unable_to_wipe=Unable to wipe {1}.")(Display_Name));
 		return false;
 	}
+	if (!Release_Userdata_Mapping(Mount_Point,
+	        Is_Decrypted && !Decrypted_Block_Device.empty()))
+		return false;
 
 	/**
 	 * On decrypted devices, IOCTL_Get_Block_Size calculates size on device mapper,
@@ -2764,6 +2768,9 @@ bool TWPartition::Wipe_F2FS() {
 		gui_msg(Msg(msg::kError, "unable_to_wipe=Unable to wipe {1}.")(Display_Name));
 		return false;
 	}
+	if (!Release_Userdata_Mapping(Mount_Point,
+	        Is_Decrypted && !Decrypted_Block_Device.empty()))
+		return false;
 
     	if (!Needs_Fs_Compress) {
     		Needs_Fs_Compress = android::base::GetBoolProperty("vold.has_compress", false);

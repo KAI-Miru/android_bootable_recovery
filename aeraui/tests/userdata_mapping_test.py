@@ -1,132 +1,173 @@
-"""Run the real encryption-wipe dispatch with a fake mapper and formatter."""
+"""Test the production cleanup policy and partition integration without a device.
+
+The policy driver includes the real production header and tests real POSIX node
+probes. The supplementary dispatch harness compiles actual partition guards and
+dispatch, stopping at fake formatters; it does not validate a kernel dm ioctl or
+claim to format a filesystem. No dmctl/dmsetup command is executed by these tests.
+"""
+from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
-from screen_timer_test import definition
 
 ROOT = Path(__file__).resolve().parents[2]
+TESTS = Path(__file__).resolve().parent
+TOOLS = (
+    ('none', [], 'none'),
+    ('of-dmctl', ['-DOF_USE_DMCTL=1'], 'dmctl delete userdata'),
+    ('tw-dmctl', ['-DTW_USE_DMCTL=1'], 'dmctl delete userdata'),
+    ('dmsetup', ['-DAERA_USE_DMSETUP=1'], 'dmsetup remove -f userdata'),
+)
 
 
-@unittest.skipUnless(sys.platform.startswith('linux') and shutil.which('g++'), 'Requires Linux C++')
-class UserdataMappingTests(unittest.TestCase):
-    def test_mapping_cleanup_precedes_format_and_preserves_state_on_failure(self):
+def definition(source, signature):
+    begin = source.index(signature)
+    opening = source.index('{', begin)
+    depth, end = 1, opening + 1
+    while depth:
+        depth += (source[end] == '{') - (source[end] == '}')
+        end += 1
+    return source[begin:end]
+
+
+def compile_driver(path, binary, flags):
+    result = subprocess.run(['g++', '-std=c++17', '-UNDEBUG', '-Wall', '-Wextra',
+                             '-Werror', *flags, str(path), '-o', str(binary)],
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(result.stderr)
+
+
+@unittest.skipUnless(sys.platform.startswith('linux') and shutil.which('g++'),
+                     'Requires Linux and a native C++ compiler')
+class UserdataMappingPolicyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory()
+        cls.binaries = []
+        for name, flags, command in TOOLS:
+            binary = Path(cls.temp.name) / name
+            compile_driver(TESTS / 'userdata_mapping_driver.cpp', binary, flags)
+            cls.binaries.append((name, binary, command))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temp.cleanup()
+
+    def check_scenarios(self, *scenarios):
+        for name, binary, _ in self.binaries:
+            for scenario in scenarios:
+                with self.subTest(tool=name, scenario=scenario):
+                    subprocess.run([str(binary), scenario], check=True, timeout=5,
+                                   capture_output=True, text=True)
+
+    def test_existing_flags_select_the_original_commands(self):
+        for name, binary, expected in self.binaries:
+            with self.subTest(tool=name):
+                result = subprocess.run([str(binary), 'command'], check=True,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.stdout.strip(), expected)
+
+    def test_real_probes_distinguish_absence_dangling_links_and_errors(self):
+        self.check_scenarios('probe')
+
+    def test_absent_mapping_does_not_execute_or_wait(self):
+        self.check_scenarios('absent')
+
+    def test_success_waits_only_as_long_as_removal_needs(self):
+        self.check_scenarios('immediate', 'delayed')
+
+    def test_final_deadline_check_and_surviving_mapping(self):
+        self.check_scenarios('deadline', 'too-late', 'survives')
+
+    def test_failed_or_missing_tool_stops_cleanup(self):
+        self.check_scenarios('command-failed', 'tool-missing')
+
+    def test_initial_and_post_command_probe_errors_stop_cleanup(self):
+        self.check_scenarios('initial-error', 'poll-error')
+
+
+@unittest.skipUnless(sys.platform.startswith('linux') and shutil.which('g++'),
+                     'Requires Linux and a native C++ compiler')
+class UserdataMappingDispatchTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory()
+        directory = Path(cls.temp.name)
         source = (ROOT / 'partition.cpp').read_text()
-        program = r'''
-#include <algorithm>
-#include <cassert>
-#include <chrono>
-#include <string>
-#include <vector>
-using namespace std;
-#define TW_INCLUDE_CRYPTO
-#define TW_IS_ENCRYPTED "encrypted"
-#define AERA_DISABLE_FORCED_ENCRYPTION "force"
-#define LOGINFO(...) ((void)0)
-#define LOGERR(...) ((void)0)
-namespace msg { enum { kError, kWarning }; }
-struct Msg { Msg(int, const char*) {} Msg operator()(const string&) { return *this; } };
-template<class T> void gui_msg(T) {}
-void gui_err(const char*) {}
-namespace android { namespace dm {
-struct DeviceMapper {
-  struct DmBlockDevice { string value; const string& name() const { return value; } };
-  vector<DmBlockDevice> devices{{"userdata"}, {"system_a"}};
-  int queries=0, deletes=0, fail_query=0;
-  bool busy=false, survives=false;
-  static DeviceMapper& Instance() { static DeviceMapper dm; return dm; }
-  bool GetAvailableDevices(vector<DmBlockDevice>* out) {
-    if (++queries == fail_query) return false;
-    *out=devices; return true;
-  }
-  bool DeleteDevice(const string& name, chrono::milliseconds timeout) {
-    assert(name=="userdata" && timeout==chrono::seconds(2)); ++deletes;
-    if (busy) return false;
-    if (!survives) devices.erase(devices.begin());
-    return true;
-  }
-};
-}}
-struct BasePartition {
-  bool PreWipeEncryption() { return true; }
-  bool PostWipeEncryption() { return true; }
-};
-struct TWFunc {
-  static bool Block_Operations_Until_Reboot() { return false; }
-  static void PostWipeEncryption() {}
-};
-struct DataManager {
-  static void SetValue(const char*, int) {}
-  static int GetIntValue(const char*) { return 0; }
-};
-struct Manager {
-  int key_wipes=0;
-  bool Wipe_By_Path(const string&) { ++key_wipes; return true; }
-  void Add_MTP_Storage(int) {}
-} PartitionManager;
-struct TWPartition {
-  string Mount_Point="/data", Display_Name="Data", Fstab_File_System="f2fs";
-  string Decrypted_Block_Device="/dev/block/dm-0", Key_Directory="/metadata/key";
-  string Symlink_Mount_Point="/sdcard";
-  bool Has_Data_Media=true, Is_Present=true, Is_Decrypted=true, Is_Encrypted=true;
-  bool Is_FBE=true, unmount_ok=true;
-  int MTP_Storage_ID=0, formats=0;
-  vector<string> Format_File_Systems() { return {"ext4","f2fs"}; }
-  BasePartition* make_partition() { return new BasePartition; }
-  void Find_Actual_Block_Device() {}
-  bool UnMount(bool) { return unmount_ok; }
-  bool Mount(bool) { return true; }
-  bool Wipe(const string&) {
-    ++formats;
-    assert(!Is_Encrypted && !Is_Decrypted && Decrypted_Block_Device.empty());
-    if (Mount_Point=="/data")
-      for (const auto& d: android::dm::DeviceMapper::Instance().devices)
-        assert(d.name()!="userdata");
-    return true;
-  }
-  bool Format_File_System(const string& fs) { return Wipe(fs); }
-  bool Wipe_Encryption(const string& filesystem);
-};
-''' + definition(source, 'static bool Release_Userdata_Mapping(') + '\n' + \
-            definition(source, 'bool TWPartition::Wipe_Encryption(') + r'''
-int main() {
-  auto& dm=android::dm::DeviceMapper::Instance();
-  for (const string fs: {"", "ext4", "f2fs"}) {
-    for (int failure=0; failure<5; ++failure) {
-      dm=android::dm::DeviceMapper(); PartitionManager.key_wipes=0;
-      TWPartition part;
-      if (failure==1) dm.busy=true;
-      if (failure==2) dm.fail_query=1;
-      if (failure==3) dm.survives=true;
-      if (failure==4) dm.fail_query=2;
-      assert(part.Wipe_Encryption(fs)==(failure==0));
-      assert(part.formats==(failure==0));
-      assert(PartitionManager.key_wipes==(failure==0));
-      if (failure) {
-        assert(part.Is_Encrypted && part.Is_Decrypted && part.Has_Data_Media);
-        assert(part.Decrypted_Block_Device=="/dev/block/dm-0");
-      }
-      assert(dm.devices.back().name()=="system_a");
-    }
-    dm=android::dm::DeviceMapper(); dm.devices.erase(dm.devices.begin());
-    TWPartition no_mapping;
-    assert(no_mapping.Wipe_Encryption(fs) && dm.deletes==0);
-  }
-  dm=android::dm::DeviceMapper();
-  TWPartition mounted; mounted.unmount_ok=false;
-  assert(!mounted.Wipe_Encryption("f2fs") && dm.queries==0 && mounted.formats==0);
-  TWPartition other; other.Mount_Point="/sd-ext";
-  assert(other.Wipe_Encryption("ext4") && dm.deletes==0);
-}
-'''
-        with tempfile.TemporaryDirectory() as folder:
-            cpp, binary = Path(folder) / 'test.cpp', Path(folder) / 'test'
-            cpp.write_text(program)
-            subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                            str(cpp), '-o', str(binary)], check=True)
-            subprocess.run([str(binary)], check=True)
+        helper = definition(source, 'static bool Release_Userdata_Mapping(')
+        # Redirect only the mapper node to the fixture's regular temporary file.
+        # Keep the real lstat probe, policy and command adapter; Exec_Cmd and
+        # sleeps are implemented by the host scaffold, never by a shell.
+        assert helper.count('"/dev/block/mapper/userdata"') == 1
+        helper = helper.replace('"/dev/block/mapper/userdata"', 'mapping_path.c_str()')
+        sections = [helper, definition(source, 'bool TWPartition::Wipe(string'),
+                    definition(source, 'bool TWPartition::Format_File_System('),
+                    definition(source, 'bool TWPartition::Wipe_Encryption(')]
+        for signature, result in (('bool TWPartition::Wipe_EXTFS(', 'File_System'),
+                                  ('bool TWPartition::Wipe_EXT4()', '"ext4"'),
+                                  ('bool TWPartition::Wipe_F2FS()', '"f2fs"')):
+            body = definition(source, signature)
+            # Preserve each actual unmount/target/cleanup prefix. The first
+            # device-size query and all real formatter work are out of scope.
+            body = body[:body.index('\tunsigned long long dev_sz =')]
+            if 'Wipe_F2FS' in signature:
+                body += '\t(void)f2fs_command; (void)needs_casefold;\n'
+            else:
+                body += '\t(void)sizeof(ret);\n'
+            body += '\t(void)NeedPreserveFooter; return RecordFormat(' + result + ');\n'
+            if 'Wipe_EXT4' in signature:
+                body += '#else\n\treturn Wipe_EXTFS("ext4");\n#endif\n'
+            sections.append(body + '}\n')
+        scaffold = (TESTS / 'userdata_mapping_dispatch_driver.cpp').read_text()
+        scaffold = scaffold.replace('#include "../../aera_userdata_mapping.hpp"',
+                                    '#include "' + str(ROOT / 'aera_userdata_mapping.hpp') + '"')
+        path = directory / 'dispatch.cpp'
+        path.write_text(scaffold.replace('// PARTITION_FUNCTIONS', '\n'.join(sections)))
+        cls.binaries = []
+        for name, tool_flags, _ in TOOLS:
+            for crypto in (False, True):
+                for legacy_ext4 in (False, True):
+                    variant = f'{name}-crypto-{int(crypto)}-legacy-ext4-{int(legacy_ext4)}'
+                    binary = directory / variant
+                    flags = tool_flags + (['-DTW_INCLUDE_CRYPTO'] if crypto else [])
+                    flags += ['-DUSE_EXT4'] if legacy_ext4 else []
+                    # Upstream Wipe() retains an unused recreate_media local.
+                    compile_driver(path, binary, flags + ['-Wno-unused-but-set-variable'])
+                    cls.binaries.append((variant, binary))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temp.cleanup()
+
+    def check_scenario(self, scenario):
+        for variant, binary in self.binaries:
+            with self.subTest(variant=variant):
+                subprocess.run([str(binary), scenario], check=True, timeout=5,
+                               capture_output=True, text=True)
+
+    def test_encryption_removal_checks_cleanup_before_state_and_key_changes(self):
+        self.check_scenario('encryption')
+
+    def test_direct_ext2_ext3_ext4_and_f2fs_paths_check_cleanup(self):
+        self.check_scenario('direct')
+
+    def test_intended_decrypted_formatter_target_is_preserved(self):
+        self.check_scenario('preserve')
+
+    def test_media_preserving_wipe_does_not_release_mapping(self):
+        self.check_scenario('media')
+
+    def test_other_partition_cannot_release_userdata(self):
+        self.check_scenario('other')
+
+    def test_unmount_failure_cannot_remove_or_format(self):
+        self.check_scenario('unmount')
+
+    def test_unsupported_filesystem_does_not_release_mapping(self):
+        self.check_scenario('unknown')
 
 
 if __name__ == '__main__':

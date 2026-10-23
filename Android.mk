@@ -116,7 +116,6 @@ else
 endif
 
 LOCAL_STATIC_LIBRARIES += libavb_user \
-                          libdm \
                           libhealthhalutils \
                           libhealthshim \
                           libinit \
