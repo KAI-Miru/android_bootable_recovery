@@ -35,7 +35,7 @@ struct Engine {
   bool suspended = false, ambient = false;
   void MouseMove(int, int) {}
   void MouseWheel(int) {}
-  void MouseButton(bool) {}
+  void MouseButton(bool, int = 1) {}
   void SetPointer(PointerEvent) { ++pointers; }
   bool KeyboardKey(int key, int) { return key == KEY_A; }
   void ShowLockScreen(bool clock = false) { ++locks; ambient = clock; }

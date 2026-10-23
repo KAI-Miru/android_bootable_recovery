@@ -31,6 +31,7 @@
 #include "twcommon.h"
 #include "twrp-functions.hpp"
 #include "aera_supplicant_link.hpp"
+#include "aera_wlan_dhcp.hpp"
 
 #ifndef LOGINFO
 #define LOGINFO(...) printf(__VA_ARGS__)
@@ -899,9 +900,46 @@ bool Wlan::InfoLocked()
     std::string ip_addr;
     ParseSupplicantStatus(status, wpa_state, ssid, ip_addr);
 
+    static auto renew_after = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (wpa_state == "COMPLETED" && !ssid.empty() && ip_addr.empty() && now >= renew_after &&
+        ssid == DataManager::GetStrValue("of_wlan_last_ssid")) {
+        // Supplicant may find a saved AP only after ConnectSaved timed out.
+        renew_after = now + std::chrono::seconds(10);
+        if (ConfigureIp(ssid) && SuppCmd("STATUS", status))
+            ParseSupplicantStatus(status, wpa_state, ssid, ip_addr);
+    }
     DataManager::SetValue("wlan_info_state", wpa_state);
 
     if (wpa_state == "COMPLETED" && !ssid.empty() && !ip_addr.empty()) {
+        // A carrier loss can remove the WLAN default route while supplicant
+        // retains the association's IPv4. Renew only our known network lease;
+        // an intentionally gateway-less LAN must remain usable as configured.
+        const auto iface = GetIface();
+        char gateway[PROPERTY_VALUE_MAX]{}, configured_ip[PROPERTY_VALUE_MAX]{};
+        property_get(("net." + iface + ".gateway").c_str(), gateway, "");
+        property_get(("net." + iface + ".ipaddress").c_str(), configured_ip, "");
+        in_addr gateway_address{};
+        if (ssid == DataManager::GetStrValue("of_wlan_last_ssid") && ip_addr == configured_ip &&
+            inet_pton(AF_INET, gateway, &gateway_address) == 1 && gateway_address.s_addr) {
+            std::ifstream routes("/proc/net/route");
+            if (!routes) return false;
+            std::string line;
+            bool routed = false;
+            while (std::getline(routes, line)) {
+                std::istringstream fields(line);
+                std::string device, destination, next_hop;
+                unsigned flags = 0;
+                if (fields >> device >> destination >> next_hop >> std::hex >> flags)
+                    routed |= device == iface && destination == "00000000" && (flags & 1);
+            }
+            if (routes.bad()) return false;
+            if (!routed) {
+                if (!ConfigureIp(ssid) || !SuppCmd("STATUS", status)) return false;
+                ParseSupplicantStatus(status, wpa_state, ssid, ip_addr);
+                if (wpa_state != "COMPLETED" || ip_addr.empty()) return false;
+            }
+        }
         // The WLAN worker refreshes RSSI; status-bar rendering only reads it.
         std::string signal;
         int rssi = -999;
@@ -1351,15 +1389,68 @@ bool Wlan::ConfigureIp(const std::string& ssid) {
 
 bool Wlan::StartDhcp() {
     const std::string iface = GetIface();
-    const std::string dhcptool = "/system/bin/dhcptool";
-
-    if (!FileExists(dhcptool)) {
-        gui_print("WLAN: dhcptool binary not found\n");
+    if (iface.empty() || iface.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-") != std::string::npos)
         return false;
+
+    char directory[] = "/tmp/aera-dhcp-XXXXXX";
+    if (!mkdtemp(directory)) return false;
+    const std::string hook = std::string(directory) + "/lease-hook";
+    const std::string lease_file = hook + ".lease";
+    const std::string applets = std::string(directory) + "/applets";
+    struct Cleanup {
+        std::string hook, lease, applets, directory;
+        ~Cleanup() {
+            unlink(hook.c_str()); unlink(lease.c_str()); unlink(applets.c_str());
+            rmdir(directory.c_str());
+        }
+    } cleanup {hook, lease_file, applets, directory};
+
+    std::vector<std::string> client;
+    const std::string standalone = FindBinary({"/system/bin/udhcpc", "/sbin/udhcpc"});
+    if (!standalone.empty()) {
+        client = {standalone};
+    } else {
+        const std::string busybox = GetBusyboxBinary();
+        std::string available;
+        if (!busybox.empty() && aera::wifi::RunDhcpProcess({busybox, "--list"}, applets, 2000) == 0 &&
+            ReadFile(applets, available) && ("\n" + available).find("\nudhcpc\n") != std::string::npos)
+            client = {busybox, "udhcpc"};
     }
 
-    if (!RunCommand(dhcptool + " " + iface + " >/tmp/dhcptool.log 2>&1"))
-        return false;
+    if (!client.empty()) {
+        if (!WriteFile(hook, aera::wifi::kDhcpHook) || chmod(hook.c_str(), 0700) != 0) return false;
+        std::string ip = FindBinary({"/system/bin/ip", "/sbin/ip"});
+        if (ip.empty()) ip = GetBusyboxBinary() + " ip";
+        // A failed network switch must not retain the previous network's IPv4 lease.
+        if (!RunCommand(ip + " -4 route flush dev " + iface) ||
+            !RunCommand(ip + " -4 addr flush dev " + iface + " scope global")) return false;
+        client.insert(client.end(), {"-f", "-n", "-q", "-i", iface, "-t", "4", "-T", "4", "-s", hook});
+        LOGINFO("WLAN: requesting DHCP lease with udhcpc on %s (30s deadline)\n", iface.c_str());
+        const int result = aera::wifi::RunDhcpProcess(client, "/tmp/dhcptool.log", 30000);
+        aera::wifi::DhcpLease lease;
+        if (result != 0 || !aera::wifi::ReadDhcpLease(lease_file, lease)) {
+            LOGERR("WLAN: DHCP lease acquisition failed (rc=%d); see /tmp/dhcptool.log\n", result);
+            return false;
+        }
+        if (!RunCommand(ip + " -4 addr add " + lease.address + "/" + std::to_string(lease.prefix) + " dev " + iface) ||
+            (!lease.gateway.empty() && !RunCommand(ip + " -4 route add default via " + lease.gateway + " dev " + iface)))
+            return false;
+        const std::string prefix = "net." + iface;
+        property_set((prefix + ".ipaddress").c_str(), lease.address.c_str());
+        property_set((prefix + ".gateway").c_str(), lease.gateway.c_str());
+        for (size_t index = 0; index < 4; ++index)
+            property_set((prefix + ".dns" + std::to_string(index + 1)).c_str(),
+                         index < lease.dns.size() ? lease.dns[index].c_str() : "");
+        g_static_ip_iface.clear();
+        LOGINFO("WLAN: DHCP assigned %s/%d gateway %s\n", lease.address.c_str(), lease.prefix, lease.gateway.c_str());
+    } else {
+        // Retain compatibility with builds whose BusyBox omits the DHCP applet.
+        if (!FileExists(BIN_DHCPTOOL) ||
+            aera::wifi::RunDhcpProcess({BIN_DHCPTOOL, iface}, "/tmp/dhcptool.log", 30000) != 0) {
+            LOGERR("WLAN: legacy DHCP failed or exceeded its 30s deadline\n");
+            return false;
+        }
+    }
 
     /*
      * dhcptool publishes DNS servers as Android properties, but recovery has
