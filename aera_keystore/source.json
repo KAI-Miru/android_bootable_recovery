@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/AERA-Recovery/android_system_security",
+  "commit": "d614e274b585a67e80d3d3fbc3a6e9f695998f78",
+  "path": "keystore2/src/keystore2_main.rs",
+  "upstream_sha256": "15830a782321146a06c3c1393abe99322964446213fbbb41174039d6efe8d0ff",
+  "change": "Omit only the Android boot-completion watcher. The linked libkeystore2 and its false boot-completed/GC gate remain unchanged."
+}
