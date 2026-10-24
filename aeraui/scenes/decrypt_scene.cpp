@@ -555,6 +555,8 @@ DecryptScene BuildDecryptScene(lv_obj_t *screen, int credential_type,
   MainBackground(screen);
   AttachStatusBar(screen, callback, context, StatusBarAction::kNone, true);
   state->language_button = widgets::Button(screen, "Language", [state] { OpenDecryptLanguage(state); });
+  lv_obj_set_style_text_align(lv_obj_get_child(state->language_button, 0),
+                             LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_set_size(state->language_button, 420, 100);
   lv_obj_align(state->language_button, LV_ALIGN_TOP_RIGHT, -80, 172);
 
