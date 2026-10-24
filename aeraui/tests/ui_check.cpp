@@ -18,6 +18,7 @@
 #include "browser/protocol.hpp"
 #include "localization/fonts/custom_font_storage.hpp"
 #include "localization/fonts/aera_fallback.hpp"
+#include "src/misc/lv_text_ap.h"
 #include "font_browser.hpp"
 #include "fonts/font_library.hpp"
 #include <json/json.h>
@@ -297,8 +298,10 @@ bool RecoverySetDockBlur(int) { return true; }
 bool RecoveryDockHideInApps() { return false; }
 bool RecoverySetDockHideInApps(bool) { return true; }
 std::string recovery_language = "en";
+static bool language_set_succeeds = true;
 std::string RecoveryLanguage() { return recovery_language; }
 bool RecoverySetLanguage(const std::string &language) {
+  if (!language_set_succeeds) return false;
   recovery_language = language;
   return true;
 }
@@ -627,6 +630,16 @@ static lv_obj_t *FindLabel(lv_obj_t *root,const char *text) {
     if(auto *found=FindLabel(lv_obj_get_child(root,i),text)) return found;
   return nullptr;
 }
+static std::string ShapedLabelText(const char *text) {
+#if LV_USE_ARABIC_PERSIAN_CHARS
+  std::string shaped(lv_text_ap_calc_bytes_count(text) + 1, '\0');
+  lv_text_ap_proc(text, shaped.data());
+  shaped.resize(std::strlen(shaped.c_str()));
+  return shaped;
+#else
+  return text;
+#endif
+}
 static lv_obj_t *FindLabelContaining(lv_obj_t *root,const char *text) {
   if (lv_obj_check_type(root, &lv_label_class) &&
       strstr(lv_label_get_text(root), text) != nullptr) return root;
@@ -859,6 +872,97 @@ int main(int argc,char **argv) {
     assert(Find(wipe, "No format targets"));
     lv_screen_load(screen); lv_obj_delete(wipe);
     puts("Filesystem selection, typed confirmation, no keyboard auto-format and English/Chinese layouts passed.");
+    return 0;
+  }
+  if (!strcmp(argv[1], "--decrypt-language")) {
+    for (const char *language : {"en", "de_DE", "zh_CN", "zh_TW", "ar_SA"})
+      for (const bool landscape : {false, true})
+        for (const int type : {1, 2, 3}) {
+          assert(i18n::SetLanguage("en"));
+          lv_display_set_resolution(display, landscape ? 3168 : 1440, landscape ? 1440 : 3168);
+          auto *unlock = lv_obj_create(nullptr);
+          const auto scene = BuildDecryptScene(unlock, type, true, 0, 3, RecordAction, nullptr);
+          lv_screen_load(unlock); Tick(2);
+          callback_count = 0; autosave_count = 0;
+          const std::string fake = type == 3 ? "1234" : "fake-password";
+          if (scene.input) lv_textarea_set_text(scene.input, fake.c_str());
+          auto *button = Find(unlock, "Language"); assert(button);
+          AssertContained(button, unlock);
+          lv_obj_send_event(button, LV_EVENT_CLICKED, nullptr); Tick(2);
+          auto *overlay = lv_obj_get_child(unlock, -1);
+          assert(lv_obj_get_user_data(overlay) == &widgets::kModalMarker);
+          AssertContained(overlay, unlock);
+          assert(!Find(overlay, "Skip for now") && !Find(overlay, "Preferences"));
+          auto *back = Find(overlay, "Back"); assert(back); AssertContained(back, overlay);
+          const auto &languages = i18n::AvailableLanguages();
+          assert(lv_obj_get_child_count(lv_obj_get_parent(Find(overlay, "English"))) == languages.size());
+          // Cancel and reopen must not submit, clear the credential, or lose state.
+          assert(widgets::DismissModal(unlock)); Tick(2);
+          assert(!callback_count && (!scene.input || GetDecryptCredential(scene) == fake));
+          lv_obj_send_event(button, LV_EVENT_CLICKED, nullptr); Tick(2);
+          overlay = lv_obj_get_child(unlock, -1);
+          const auto selected = std::find_if(languages.begin(), languages.end(),
+              [language](const auto &entry) { return !strcmp(entry.code, language); });
+          assert(selected != languages.end());
+          // Native Arabic labels contain shaped glyph forms; use the English
+          // subtitle to target the same row without depending on text shaping.
+          auto *row = Find(overlay, selected->name);
+          if (!row) {
+            fprintf(stderr, "Missing language %s, type=%d, landscape=%d\n", language, type, landscape);
+          }
+          assert(row);
+          lv_obj_scroll_to_view(row, LV_ANIM_OFF); Tick(2);
+          AssertContained(row, lv_obj_get_parent(row));
+          if (!landscape && type == 3 && !strcmp(language, "zh_CN"))
+            save("/tmp/aera-decrypt-language-picker.png");
+          lv_obj_send_event(row, LV_EVENT_CLICKED, nullptr); Tick(2);
+          assert(!strcmp(i18n::CurrentLanguage(), language));
+          assert(RecoveryLanguage() == language);
+          for (const char *tag : {"Unlock your storage", "Unlock storage", "Skip for now"})
+            assert(FindLabel(unlock, ShapedLabelText(i18n::Translate(tag)).c_str()));
+          assert(lv_obj_get_style_base_dir(unlock, LV_PART_MAIN) ==
+              (i18n::IsRightToLeft() ? LV_BASE_DIR_RTL : LV_BASE_DIR_LTR));
+          if (scene.input) {
+            assert(GetDecryptCredential(scene) == fake);
+            assert(!strcmp(lv_textarea_get_placeholder_text(scene.input),
+                i18n::Translate(type == 3 ? "Enter PIN" : "Enter password")));
+          }
+          assert(callback_count == 0 && autosave_count == 0);
+          if (!landscape && type == 3 && !strcmp(language, "zh_CN"))
+            save("/tmp/aera-decrypt-language-chinese.png");
+          // Switching is unavailable while an unlock attempt is running.
+          SetDecryptBusy(scene);
+          button = Find(unlock, ShapedLabelText(i18n::Translate("Language")).c_str()); assert(button);
+          assert(lv_obj_has_state(button, LV_STATE_DISABLED));
+          lv_obj_send_event(button, LV_EVENT_CLICKED, nullptr); Tick(2);
+          assert(!widgets::DismissModal(unlock));
+          CompleteDecryptAttempt(scene, false);
+          assert(!lv_obj_has_state(button, LV_STATE_DISABLED));
+          lv_obj_send_event(button, LV_EVENT_CLICKED, nullptr); Tick(2);
+          // Destroying the scene with its picker open must release callbacks safely.
+          lv_screen_load(screen); lv_obj_delete(unlock); Tick(2);
+        }
+    assert(i18n::SetLanguage("en"));
+    auto *unlock = lv_obj_create(nullptr);
+    auto scene = BuildDecryptScene(unlock, 3, true, 10, 3, RecordAction, nullptr, "Work");
+    lv_screen_load(unlock); Tick(2);
+    auto *button = Find(unlock, "Language");
+    lv_obj_send_event(button, LV_EVENT_CLICKED, nullptr); Tick(2);
+    auto *overlay = lv_obj_get_child(unlock, -1);
+    language_set_succeeds = false;
+    lv_obj_send_event(Find(overlay, "Deutsch"), LV_EVENT_CLICKED, nullptr); Tick(2);
+    assert(!strcmp(i18n::CurrentLanguage(), "en"));
+    assert(Find(overlay, "Language unavailable"));
+    language_set_succeeds = true;
+    assert(widgets::DismissModal(overlay)); Tick(2);
+    lv_obj_send_event(Find(overlay, "Deutsch"), LV_EVENT_CLICKED, nullptr); Tick(2);
+    assert(FindLabel(unlock, i18n::Format("Unlock %s", "Work").c_str()));
+    callback_count = 0;
+    lv_obj_send_event(scene.submit, LV_EVENT_CLICKED, nullptr);
+    assert(callback_count == 1 && last_action == Action::kDecryptSubmit);
+    lv_screen_load(screen); lv_obj_delete(unlock);
+    i18n::SetLanguage("en");
+    puts("Pre-unlock language selection preserves credentials and gating across five locales, all credential types and both orientations.");
     return 0;
   }
   if (!strcmp(argv[1], "--screen-lock")) {

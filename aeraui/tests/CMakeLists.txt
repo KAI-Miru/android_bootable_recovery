@@ -59,6 +59,7 @@ target_link_libraries(ui_check PRIVATE lvgl PNG::PNG JPEG::JPEG Threads::Threads
 enable_testing()
 add_test(NAME filesystem_format_ui COMMAND ui_check --filesystem-format)
 add_test(NAME fastbootd_menu_ui COMMAND ui_check --fastbootd-menu)
+add_test(NAME decrypt_language_ui COMMAND ui_check --decrypt-language)
 foreach(mode unset disabled enabled)
   add_executable(mobile_data_flag_${mode}_test mobile_data_flag_test.cpp)
   target_include_directories(mobile_data_flag_${mode}_test PRIVATE ../include)
