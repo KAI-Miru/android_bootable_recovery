@@ -23,6 +23,7 @@
 #include "scene.hpp"
 #include "ui_components.hpp"
 #include "package_review.hpp"
+#include "../platform/image_targets.hpp"
 #include "../core/operation_affinity.hpp"
 
 namespace aeraui {
@@ -145,38 +146,6 @@ std::string Lower(std::string value) {
   for (char &character : value)
     character = static_cast<char>(tolower(static_cast<unsigned char>(character)));
   return value;
-}
-
-std::string SuggestedImageTarget(const std::string &name) {
-  const std::string lower = Lower(name);
-  if (lower.find("init_boot") != std::string::npos) return "/init_boot";
-  if (lower.find("vendor_boot") != std::string::npos) return "/vendor_boot";
-  if (lower.find("system_ext") != std::string::npos) return "/system_ext";
-  if (lower.find("system_dlkm") != std::string::npos) return "/system_dlkm";
-  if (lower.find("vendor_dlkm") != std::string::npos) return "/vendor_dlkm";
-  if (lower.find("odm_dlkm") != std::string::npos) return "/odm_dlkm";
-  if (lower.find("my_engineering") != std::string::npos) return "/my_engineering";
-  if (lower.find("my_manifest") != std::string::npos) return "/my_manifest";
-  if (lower.find("my_product") != std::string::npos) return "/my_product";
-  if (lower.find("my_company") != std::string::npos) return "/my_company";
-  if (lower.find("my_carrier") != std::string::npos) return "/my_carrier";
-  if (lower.find("my_region") != std::string::npos) return "/my_region";
-  if (lower.find("my_bigball") != std::string::npos) return "/my_bigball";
-  if (lower.find("my_heytap") != std::string::npos) return "/my_heytap";
-  if (lower.find("my_stock") != std::string::npos) return "/my_stock";
-  if (lower.find("my_preload") != std::string::npos) return "/my_preload";
-  if (lower.find("product") != std::string::npos) return "/product";
-  if (lower.find("vendor") != std::string::npos) return "/vendor";
-  if (lower.find("system") != std::string::npos) return "/system";
-  if (lower.find("odm") != std::string::npos) return "/odm";
-  if (lower.find("abl") != std::string::npos) return "/abl";
-  if (lower.find("dtbo") != std::string::npos) return "/dtbo";
-  if (lower.find("recovery") != std::string::npos ||
-      lower.find("twrp") != std::string::npos ||
-      lower.find("orangefox") != std::string::npos ||
-      lower.find("aera") != std::string::npos) return "/recovery";
-  if (lower.find("boot") != std::string::npos) return "/boot";
-  return {};
 }
 
 const char *ImageTargetDescription(const std::string &path) {
@@ -733,11 +702,10 @@ void OpenImageTargetPicker(Files *state, const Entry &entry) {
     lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -28, 0);
   };
 
-  const std::string suggestion = SuggestedImageTarget(entry.name);
+  const std::string suggestion = images::SuggestedTarget(entry.name, targets);
   const auto recommended = std::find_if(
       targets.begin(), targets.end(), [&](const Volume &target) {
-        return target.path == suggestion ||
-               (suggestion == "/system" && target.path == "/system_root");
+        return target.path == suggestion;
       });
   if (recommended != targets.end()) {
     auto *recommended_title = Label(list, "DETECTED FROM FILENAME",

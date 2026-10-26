@@ -2,6 +2,7 @@
 #pragma once
 #include <aeraui/backend.hpp>
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <set>
 #include <string>
@@ -20,6 +21,42 @@ inline std::string BaseName(const std::string &name) {
   if (name.size() > 2 && (name.compare(name.size()-2, 2, "_a") == 0 ||
                          name.compare(name.size()-2, 2, "_b") == 0)) return name.substr(0, name.size()-2);
   return name;
+}
+inline std::string SuggestedTarget(std::string filename, const std::vector<Volume> &targets) {
+  for (char &c : filename) c = std::tolower(static_cast<unsigned char>(c));
+  if (filename.size() >= 4 && filename.compare(filename.size() - 4, 4, ".img") == 0)
+    filename.resize(filename.size() - 4);
+  struct Match { size_t begin, end; std::string path; };
+  std::vector<Match> matches;
+  for (const auto &target : targets) {
+    std::string name = target.path.substr(target.path.find_last_of('/') + 1);
+    // Filesystem image entries may use recovery mount-point aliases.
+    if (target.path == "/system_root") name = "system";
+    else if (target.path == "/system_image") name = "system";
+    else if (target.path == "/vendor_image") name = "vendor";
+    if (target.slot_select) name = BaseName(name);
+    if (!ValidName(name)) continue;
+    for (char &c : name) c = std::tolower(static_cast<unsigned char>(c));
+    for (size_t at = filename.find(name); at != std::string::npos;
+         at = filename.find(name, at + 1)) {
+      const auto end = at + name.size();
+      if ((at == 0 || !std::isalnum(static_cast<unsigned char>(filename[at - 1]))) &&
+          (end == filename.size() || !std::isalnum(static_cast<unsigned char>(filename[end]))))
+        matches.push_back({at, end, target.path});
+    }
+  }
+  std::string result;
+  for (const auto &match : matches) {
+    // Prefer vendor_boot over the nested boot match, but do not guess when
+    // separate partition names occur in the same filename.
+    if (std::any_of(matches.begin(), matches.end(), [&](const Match &other) {
+          return other.begin <= match.begin && other.end >= match.end &&
+                 other.end - other.begin > match.end - match.begin;
+        })) continue;
+    if (!result.empty() && result != match.path) return {};
+    result = match.path;
+  }
+  return result;
 }
 inline std::vector<Volume> PhysicalTargets(const std::map<std::string, Block> &blocks,
                                          const std::set<std::string> &represented) {
