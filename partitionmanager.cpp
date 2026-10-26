@@ -22,7 +22,6 @@
 #include <stdio.h>
 #include "aera_image_flash_batch.hpp"
 #include "aera_frp_wipe.hpp"
-#include "aera_persist_sfs.hpp"
 #include "aera_remote/backup_cancel.hpp"
 #include "aera_image_flash_mounts.hpp"
 #include "aera_mobile/client.hpp"
@@ -804,10 +803,6 @@ clear:
 }
 
 void TWPartitionManager::Setup_Fstab_Partitions(bool Display_Error) {
-	#ifdef TW_INCLUDE_CRYPTO
-		// Partition_Post_Processing can already enter FBE/Keymaster setup.
-		aera::PreparePersistForSfs();
-	#endif
 		TWPartition* settings_partition = NULL;
 		TWPartition* andsec_partition = NULL;
 		std::vector<TWPartition*>::iterator iter;
