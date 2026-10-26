@@ -659,14 +659,12 @@ TWRP_REQUIRED_MODULES += \
     servicemanager.rc
 
 ifneq ($(TW_INCLUDE_CRYPTO),)
-# Use the recovery entrypoint with the unchanged platform crypto library.
-RECOVERY_BINARY_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/aera_keystore2
 TWRP_REQUIRED_MODULES += \
     vold_prepare_subdirs \
     task_profiles.json \
     fscryptpolicyget.recovery \
     keystore_auth \
-    aera_keystore2 \
+    keystore2 \
     android.system.keystore2-service.xml \
     keystore2.rc \
     plat_keystore2_key_contexts
