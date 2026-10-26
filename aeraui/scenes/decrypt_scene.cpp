@@ -61,7 +61,7 @@ struct DecryptState {
 };
 
 void DeleteState(lv_event_t *event) {
-  auto* state = static_cast<DecryptState*>(lv_event_get_user_data(event));
+  auto *state = static_cast<DecryptState *>(lv_event_get_user_data(event));
   if (state->retry_timer) lv_timer_delete(state->retry_timer);
   // The picker has delete callbacks that still refer to this scene state.
   if (state->language_picker) lv_obj_delete(state->language_picker);

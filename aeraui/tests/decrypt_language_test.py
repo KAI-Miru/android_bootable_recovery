@@ -29,6 +29,7 @@ class DecryptLanguageTests(unittest.TestCase):
 #define TW_TIME_ZONE_VAR "timezone"
 #define AERA_PRESERVE_RECOVERY_VAR "preserve_recovery"
 #define AERA_PRESERVE_ABL_VAR "preserve_abl"
+#define AERA_PRESERVE_SPLASH_VAR "preserve_splash"
 #define TW_SKIP_DIGEST_GENERATE_VAR "skip_digest_generate"
 #define TW_SKIP_DIGEST_CHECK_VAR "skip_digest_check"
 struct DataManager {

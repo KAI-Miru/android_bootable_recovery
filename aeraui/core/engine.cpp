@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <poll.h>
 #include <string>
@@ -474,6 +475,7 @@ public:
     nas_running_ = false;
     plugin_running_ = false;
     plugin_task_ = PluginTask::kNone;
+    after_plugin_refresh_ = {};
     plugin_auto_queue_.clear();
     console_commands_ready_ = false;
     plugin_connection_seen_ = false;
@@ -635,7 +637,11 @@ public:
           if (!success) widgets::Sheet(lv_screen_active(), "Operation failed", message);
         }
       } else if (completed == PluginTask::kBackgroundRefresh) {
-        if (success)
+        auto resume = std::move(after_plugin_refresh_);
+        after_plugin_refresh_ = {};
+        if (resume)
+          resume();
+        else if (success && !plugin_progress_.cancel.load())
           BeginAutomaticPluginUpdates();
         else
           RefreshPluginSurfaces();
@@ -750,18 +756,18 @@ public:
       return;
     }
     if (backend_ready_ && !operation_running_ && !nas_running_ &&
-        !plugin_running_ &&
+        !PluginBlocksUi() &&
         widgets::DismissModal(lv_screen_active())) return;
     if (backend_ready_ && current_tool_ == Action::kFiles && !operation_running_ &&
-        !nas_running_ && !plugin_running_ && NavigateFileBack()) return;
+        !nas_running_ && !PluginBlocksUi() && NavigateFileBack()) return;
     if (backend_ready_ && !operation_running_ && !nas_running_ &&
-        !plugin_running_ &&
+        !PluginBlocksUi() &&
         current_tool_ == Action::kFormatData) {
       HandleSceneAction(Action::kWipe, this);
       return;
     }
     if (backend_ready_ && !decryption_active_ && !on_home_ &&
-        !operation_running_ && !nas_running_ && !plugin_running_) {
+        !operation_running_ && !nas_running_ && !PluginBlocksUi()) {
       navigation_history_.clear();
       ShowHome();
     }
@@ -787,7 +793,7 @@ public:
       return;
     }
     if (lock_overlay_ != nullptr || !backend_ready_ || decryption_active_ ||
-        operation_running_ || (nas_running_ && nas_interactive_) || plugin_running_)
+        operation_running_ || (nas_running_ && nas_interactive_) || PluginBlocksUi())
       return;
     if (widgets::DismissModal(lv_screen_active())) return;
     if (fastboot_mode_) {
@@ -883,7 +889,7 @@ public:
   hardware_keys::State physical_keys_;
   bool DesktopInputAllowed() const {
     return !suspended_ && !lock_overlay_ && !power_overlay_ && backend_ready_ &&
-        !operation_running_ && !nas_running_ && !plugin_running_ && !update_installing_;
+        !operation_running_ && !nas_running_ && !PluginBlocksUi() && !update_installing_;
   }
   void ResetKeyboard() {
     physical_keys_.Reset();
@@ -995,7 +1001,7 @@ public:
     if (widgets::PointerDragActive() || suspended_ || lock_overlay_ != nullptr ||
         power_overlay_ != nullptr ||
         !backend_ready_ ||
-        operation_running_ || nas_running_ || plugin_running_ ||
+        operation_running_ || nas_running_ || PluginBlocksUi() ||
         update_installing_ ||
         (update_running_ && update_task_ == UpdateTask::kDownload)) {
       if (slot != 0) return;
@@ -1226,8 +1232,12 @@ public:
     ShowLockScreen(lock_ambient_);
   }
 
+  bool PluginBlocksUi() const {
+    return plugin_running_ && (plugin_task_ != PluginTask::kBackgroundRefresh ||
+                               static_cast<bool>(after_plugin_refresh_));
+  }
   bool CanReboot() const {
-    return !operation_running_ && !nas_running_ && !plugin_running_ && !decrypt_running_ &&
+    return !operation_running_ && !nas_running_ && !PluginBlocksUi() && !decrypt_running_ &&
         !aera::backup::Operations().Active() && !plugin_api::PluginStorageBusy();
   }
   bool NeedsWake() const {
@@ -2303,7 +2313,7 @@ private:
     if (!recents_swipe_active_ || recents_swipe_hold_committed_ ||
         recents_swipe_hold_started_ms_ == 0)
       return;
-    if (operation_running_ || nas_running_ || plugin_running_ ||
+    if (operation_running_ || nas_running_ || PluginBlocksUi() ||
         update_installing_ ||
         (update_running_ && update_task_ == UpdateTask::kDownload)) {
       CancelRecentsSwipe();
@@ -2698,7 +2708,7 @@ private:
       return;
     }
 
-    if (self->operation_running_ || (self->nas_running_ && self->nas_interactive_) || self->plugin_running_ ||
+    if (self->operation_running_ || (self->nas_running_ && self->nas_interactive_) || self->PluginBlocksUi() ||
         (self->update_running_ &&
          self->update_task_ == UpdateTask::kDownload)) return;
     self->CancelEdgeSwipe();
@@ -3267,7 +3277,7 @@ private:
     if (!pc_job_id_.empty() && plugin_running_ && plugin_task_ == PluginTask::kPcInstall)
       aera::pc::UpdateInstall(plugin_progress_.value.load(), "Verifying and installing plugin", "");
     bool pc_busy = !interactive_ready_ || decryption_active_ || decrypt_running_ ||
-        operation_running_ || wifi_running_ || nas_running_ || plugin_running_ ||
+        operation_running_ || wifi_running_ || nas_running_ || PluginBlocksUi() ||
         update_running_ || fastboot_mode_ || power_overlay_ ||
         current_scene_ == Action::kRootManager || current_scene_ == Action::kAppVault;
 #ifndef TW_OEM_BUILD
@@ -3388,7 +3398,16 @@ private:
     lv_obj_set_pos(allow, 630, 658); lv_obj_set_size(allow, 570, 110);
   }
 
+  bool DeferForPluginCatalog(std::function<void()> resume) {
+    if (!plugin_running_ || plugin_task_ != PluginTask::kBackgroundRefresh) return false;
+    if (!after_plugin_refresh_) after_plugin_refresh_ = std::move(resume);
+    plugin_auto_queue_.clear();
+    plugin_progress_.cancel.store(true);
+    return true;
+  }
+
   void StartJob(const JobRequest &request) {
+    if (DeferForPluginCatalog([this, request] { StartJob(request); })) return;
     if (operation_running_ || wifi_running_ || nas_running_ || plugin_running_)
       return;
     if (plugin_api::PluginStorageBusy()) {
@@ -3473,6 +3492,7 @@ private:
   }
 
   void StartNas(const NasRequest &request) {
+    if (DeferForPluginCatalog([this, request] { StartNas(request); })) return;
     if (nas_running_ || operation_running_ || wifi_running_ || plugin_running_)
       return;
     if (request.interactive && request.operation == NasOperation::kUnmount)
@@ -3493,6 +3513,7 @@ private:
 
   void StartPlugin(const plugins::Request &request,
                    PluginTask task = PluginTask::kInteractive) {
+    if (DeferForPluginCatalog([this, request, task] { StartPlugin(request, task); })) return;
     if (plugin_running_ || operation_running_ || wifi_running_ || nas_running_)
       return;
     if (request.job == plugins::Job::kRemove)
@@ -3584,6 +3605,7 @@ private:
   }
 
   void StartUpdateDownload() {
+    if (DeferForPluginCatalog([this] { StartUpdateDownload(); })) return;
     if (update_running_ || operation_running_ || wifi_running_ ||
         nas_running_ || plugin_running_) return;
     if (!RecoveryNetworkConnected()) {
@@ -4226,6 +4248,7 @@ private:
   bool console_commands_ready_ = false;
   bool plugin_connection_seen_ = false;
   PluginTask plugin_task_ = PluginTask::kNone;
+  std::function<void()> after_plugin_refresh_;
   plugins::Job plugin_job_ = plugins::Job::kRefresh;
   bool update_running_ = false;
   bool update_manual_ = false;

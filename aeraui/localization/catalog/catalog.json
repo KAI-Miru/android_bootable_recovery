@@ -36,6 +36,76 @@
     "zh_TW"
   ],
   "strings": {
+    "Keep splash": {
+      "en": "Keep splash",
+      "ar_SA": "الاحتفاظ بصورة بدء التشغيل",
+      "bg_BG": "Запазване на началното изображение",
+      "bn_BD": "বুট স্প্ল্যাশ রাখুন",
+      "ca_ES": "Conserva la imatge d’arrencada",
+      "cs_CZ": "Zachovat úvodní obrázek",
+      "de_DE": "Bootlogo beibehalten",
+      "el_GR": "Διατήρηση εικόνας εκκίνησης",
+      "es-ES": "Conservar imagen de arranque",
+      "fa_IR": "حفظ تصویر آغازین",
+      "fr_FR": "Conserver l’image de démarrage",
+      "he_IL": "שמירת תמונת האתחול",
+      "hi_IN": "बूट स्प्लैश बनाए रखें",
+      "hu": "Indítókép megőrzése",
+      "id_ID": "Pertahankan gambar boot",
+      "it_IT": "Mantieni immagine di avvio",
+      "ja_JP": "起動ロゴを保持",
+      "ko_KR": "부팅 로고 유지",
+      "nl_NL": "Opstartafbeelding behouden",
+      "no_NO": "Behold oppstartsbilde",
+      "pl_PL": "Zachowaj obraz startowy",
+      "pt_BR": "Manter imagem de inicialização",
+      "pt_PT": "Manter imagem de arranque",
+      "ro_RO": "Păstrează imaginea de pornire",
+      "ru": "Сохранять загрузочную заставку",
+      "sr_Cyrl": "Задржи почетну слику",
+      "sv_SE": "Behåll startbild",
+      "th_TH": "เก็บภาพเริ่มต้นระบบ",
+      "tr_TR": "Açılış görselini koru",
+      "uk_UA": "Зберігати заставку завантаження",
+      "vi_VN": "Giữ hình khởi động",
+      "zh_CN": "保留开机画面",
+      "zh_TW": "保留開機畫面"
+    },
+    "Keep the current boot splash during ZIP installs. Manual image flashing can override this.": {
+      "en": "Keep the current boot splash during ZIP installs. Manual image flashing can override this.",
+      "ar_SA": "الاحتفاظ بصورة بدء التشغيل الحالية عند تثبيت ZIP. يمكن تجاوز ذلك بتفليش الصورة يدويًا.",
+      "bg_BG": "Запазва текущото начално изображение при инсталиране на ZIP. Ръчното записване на образ може да го замени.",
+      "bn_BD": "ZIP ইনস্টলের সময় বর্তমান বুট স্প্ল্যাশ রাখুন। ম্যানুয়ালি ইমেজ ফ্ল্যাশ করলে এটি বদলাতে পারে।",
+      "ca_ES": "Conserva la imatge d’arrencada actual en instal·lar ZIP. Es pot substituir flashejant una imatge manualment.",
+      "cs_CZ": "Zachová aktuální úvodní obrázek při instalaci ZIP. Ruční zápis obrazu jej může přepsat.",
+      "de_DE": "Behält das aktuelle Bootlogo bei ZIP-Installationen bei. Manuelles Flashen eines Images kann es überschreiben.",
+      "el_GR": "Διατηρεί την τρέχουσα εικόνα εκκίνησης κατά την εγκατάσταση ZIP. Η χειροκίνητη εγγραφή εικόνας μπορεί να την αντικαταστήσει.",
+      "es-ES": "Conserva la imagen de arranque actual al instalar ZIP. El flasheo manual de una imagen puede reemplazarla.",
+      "fa_IR": "تصویر آغازین فعلی هنگام نصب ZIP حفظ می‌شود. فلش دستی تصویر می‌تواند آن را جایگزین کند.",
+      "fr_FR": "Conserve l’image de démarrage actuelle lors des installations ZIP. Le flash manuel d’une image peut la remplacer.",
+      "he_IL": "שמירת תמונת האתחול הנוכחית בהתקנת ZIP. צריבה ידנית של קובץ תמונה יכולה להחליף אותה.",
+      "hi_IN": "ZIP इंस्टॉल करते समय मौजूदा बूट स्प्लैश बनाए रखें। मैन्युअल इमेज फ़्लैश इसे बदल सकता है।",
+      "hu": "Megtartja a jelenlegi indítóképet ZIP telepítésekor. Kézi képfájlírással felülírható.",
+      "id_ID": "Pertahankan gambar boot saat ini selama instalasi ZIP. Flash image secara manual dapat menimpanya.",
+      "it_IT": "Mantiene l’immagine di avvio attuale durante le installazioni ZIP. Il flash manuale di un’immagine può sovrascriverla.",
+      "ja_JP": "ZIPのインストール中に現在の起動ロゴを保持します。手動でイメージを書き込むと上書きできます。",
+      "ko_KR": "ZIP 설치 중 현재 부팅 로고를 유지합니다. 수동 이미지 플래시로 덮어쓸 수 있습니다.",
+      "nl_NL": "Behoudt de huidige opstartafbeelding bij ZIP-installaties. Handmatig een image flashen kan deze overschrijven.",
+      "no_NO": "Beholder gjeldende oppstartsbilde ved ZIP-installasjoner. Manuell flashing av et bilde kan overskrive det.",
+      "pl_PL": "Zachowuje bieżący obraz startowy podczas instalacji ZIP. Ręczne flashowanie obrazu może go nadpisać.",
+      "pt_BR": "Mantém a imagem de inicialização atual ao instalar ZIPs. Gravar uma imagem manualmente pode substituí-la.",
+      "pt_PT": "Mantém a imagem de arranque atual ao instalar ZIP. A gravação manual de uma imagem pode substituí-la.",
+      "ro_RO": "Păstrează imaginea de pornire actuală la instalarea ZIP. Scrierea manuală a unei imagini o poate înlocui.",
+      "ru": "Сохраняет текущую загрузочную заставку при установке ZIP. Ручная прошивка образа может её заменить.",
+      "sr_Cyrl": "Задржава тренутну почетну слику при инсталацији ZIP-а. Ручно флешовање слике може да је замени.",
+      "sv_SE": "Behåller den aktuella startbilden vid ZIP-installationer. Manuell flashning av en avbildning kan skriva över den.",
+      "th_TH": "เก็บภาพเริ่มต้นระบบปัจจุบันระหว่างติดตั้ง ZIP การแฟลชอิมเมจด้วยตนเองสามารถเขียนทับได้",
+      "tr_TR": "ZIP kurulumlarında mevcut açılış görselini korur. Elle imaj yüklemek bu görselin üzerine yazabilir.",
+      "uk_UA": "Зберігає поточну заставку завантаження під час установлення ZIP. Прошивання образу вручну може її замінити.",
+      "vi_VN": "Giữ hình khởi động hiện tại khi cài ZIP. Việc flash ảnh thủ công có thể ghi đè hình này.",
+      "zh_CN": "安装 ZIP 时保留当前开机画面。手动刷入镜像仍可覆盖它。",
+      "zh_TW": "安裝 ZIP 時保留目前的開機畫面。手動刷入映像檔仍可覆寫。"
+    },
     "Start logging": {
       "en": "Start logging",
       "ar_SA": "بدء التسجيل",
@@ -73144,6 +73214,86 @@
       "en": "Connect when recovery starts",
       "zh_CN": "启动 Recovery 时连接",
       "zh_TW": "啟動 Recovery 時連線"
+    },
+    "%s\n\nThe ZIP will be safely rewritten and verified before the original is replaced.": {
+      "zh_CN": "%s\n\nZIP 将被安全重写并验证，然后才会替换原文件。",
+      "zh_TW": "%s\n\nZIP 將被安全重寫並驗證，然後才會取代原始檔案。"
+    },
+    "%zu selected ZIP items": {
+      "zh_CN": "已选择 %zu 个 ZIP 项目",
+      "zh_TW": "已選取 %zu 個 ZIP 項目"
+    },
+    "Add selected": {
+      "zh_CN": "添加所选项目",
+      "zh_TW": "加入所選項目"
+    },
+    "Add to ZIP": {
+      "zh_CN": "添加到 ZIP",
+      "zh_TW": "加入 ZIP"
+    },
+    "Archive": {
+      "zh_CN": "压缩包",
+      "zh_TW": "壓縮檔"
+    },
+    "Cannot extract archive": {
+      "zh_CN": "无法解压压缩包",
+      "zh_TW": "無法解壓縮壓縮檔"
+    },
+    "Cannot open archive": {
+      "zh_CN": "无法打开压缩包",
+      "zh_TW": "無法開啟壓縮檔"
+    },
+    "Choose Wi-Fi network": {
+      "zh_CN": "选择 Wi-Fi 网络",
+      "zh_TW": "選擇 Wi-Fi 網路"
+    },
+    "Choose how AERA signs in to your SFTP server": {
+      "zh_CN": "选择 AERA 登录 SFTP 服务器的方式",
+      "zh_TW": "選擇 AERA 登入 SFTP 伺服器的方式"
+    },
+    "Connect Wi-Fi before mounting network storage": {
+      "zh_CN": "挂载网络存储前请先连接 Wi-Fi",
+      "zh_TW": "掛載網路儲存空間前請先連線 Wi-Fi"
+    },
+    "Delete from ZIP?": {
+      "zh_CN": "从 ZIP 中删除？",
+      "zh_TW": "從 ZIP 中刪除？"
+    },
+    "Enter SSID manually": {
+      "zh_CN": "手动输入 SSID",
+      "zh_TW": "手動輸入 SSID"
+    },
+    "Extract here": {
+      "zh_CN": "解压到此处",
+      "zh_TW": "在此解壓縮"
+    },
+    "Extract to": {
+      "zh_CN": "解压到",
+      "zh_TW": "解壓縮至"
+    },
+    "No saved networks": {
+      "zh_CN": "无已保存的网络",
+      "zh_TW": "沒有已儲存的網路"
+    },
+    "No selection - the complete archive will be extracted": {
+      "zh_CN": "未选择项目，将解压整个压缩包",
+      "zh_TW": "未選取項目，將解壓縮整個壓縮檔"
+    },
+    "Save a network in Wi-Fi settings, or enter its SSID manually.": {
+      "zh_CN": "请在 Wi-Fi 设置中保存网络，或手动输入其 SSID。",
+      "zh_TW": "請在 Wi-Fi 設定中儲存網路，或手動輸入其 SSID。"
+    },
+    "Select a saved network or enter its SSID manually.": {
+      "zh_CN": "选择已保存的网络，或手动输入其 SSID。",
+      "zh_TW": "選擇已儲存的網路，或手動輸入其 SSID。"
+    },
+    "Select files or hold folders to add": {
+      "zh_CN": "选择文件或长按文件夹添加",
+      "zh_TW": "選擇檔案或長按資料夾加入"
+    },
+    "Share, remote path and domain settings": {
+      "zh_CN": "共享、远程路径及域设置",
+      "zh_TW": "共用、遠端路徑及網域設定"
     }
   }
 }
