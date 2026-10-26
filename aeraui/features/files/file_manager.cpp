@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <locale.h>
+#include <openssl/evp.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/stat.h>
@@ -21,8 +22,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <sstream>
+#include <iomanip>
 #include <set>
+#include <sstream>
 #include <cwchar>
 #include <cwctype>
 
@@ -1407,6 +1409,7 @@ void Progress::Reset() {
   std::lock_guard<std::mutex> lock(text_mutex);
   status.clear();
   detail.clear();
+  checksum.clear();
 }
 
 Snapshot Progress::Get() const {
@@ -1425,6 +1428,7 @@ Snapshot Progress::Get() const {
   std::lock_guard<std::mutex> lock(text_mutex);
   value.status = status;
   value.detail = detail;
+  value.checksum = checksum;
   return value;
 }
 
@@ -1691,6 +1695,92 @@ bool Rename(const std::string& source, const std::string& destination, std::stri
   return false;
 }
 
+namespace {
+
+bool CalculateChecksum(const std::string& path, ChecksumType type,
+                       Progress& progress, std::string& checksum,
+                       std::string& error) {
+  const Metadata metadata = Inspect(path);
+  if (!metadata.exists || !metadata.regular) {
+    error = "Checksums can only be calculated for regular files.";
+    return false;
+  }
+
+  const int file = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (file < 0) {
+    error = Error("Cannot open file for checksum", path);
+    return false;
+  }
+
+  struct stat opened{};
+  if (fstat(file, &opened) != 0 || !S_ISREG(opened.st_mode)) {
+    close(file);
+    error = "The selected checksum source is no longer a regular file.";
+    return false;
+  }
+
+  const EVP_MD* digest =
+      type == ChecksumType::kMD5 ? EVP_md5() : EVP_sha256();
+  EVP_MD_CTX* context = EVP_MD_CTX_new();
+  if (digest == nullptr || context == nullptr ||
+      EVP_DigestInit_ex(context, digest, nullptr) != 1) {
+    if (context != nullptr) EVP_MD_CTX_free(context);
+    close(file);
+    error = "Could not initialize the checksum calculator.";
+    return false;
+  }
+
+  progress.total_bytes.store(
+      opened.st_size > 0 ? static_cast<uint64_t>(opened.st_size) : 0);
+  progress.total_items.store(1);
+  std::array<unsigned char, 256 * 1024> buffer{};
+  bool okay = true;
+  while (!progress.cancel.load()) {
+    const ssize_t count = read(file, buffer.data(), buffer.size());
+    if (count > 0) {
+      if (EVP_DigestUpdate(context, buffer.data(),
+                           static_cast<size_t>(count)) != 1) {
+        error = "Could not update the checksum.";
+        okay = false;
+        break;
+      }
+      progress.completed_bytes.fetch_add(static_cast<uint64_t>(count));
+      UpdatePercent(progress);
+      continue;
+    }
+    if (count == 0) break;
+    if (errno == EINTR) continue;
+    error = Error("Cannot read file for checksum", path);
+    okay = false;
+    break;
+  }
+  close(file);
+
+  if (progress.cancel.load() || !okay) {
+    EVP_MD_CTX_free(context);
+    return false;
+  }
+
+  std::array<unsigned char, EVP_MAX_MD_SIZE> bytes{};
+  unsigned int length = 0;
+  if (EVP_DigestFinal_ex(context, bytes.data(), &length) != 1) {
+    EVP_MD_CTX_free(context);
+    error = "Could not finalize the checksum.";
+    return false;
+  }
+  EVP_MD_CTX_free(context);
+
+  std::ostringstream output;
+  output << std::hex << std::setfill('0');
+  for (unsigned int index = 0; index < length; ++index)
+    output << std::setw(2) << static_cast<unsigned>(bytes[index]);
+  checksum = output.str();
+  progress.completed_items.store(1);
+  return true;
+}
+
+}  // namespace
+
 void Search(const SearchRequest& request, SearchProgress& progress) {
   // Filename case conversion uses a thread-local UTF-8 locale, never the UI's.
   locale_t locale = newlocale(LC_CTYPE_MASK, "C.UTF-8", nullptr);
@@ -1776,6 +1866,34 @@ void Search(const SearchRequest& request, SearchProgress& progress) {
 
 void Run(const Request& request, Progress& progress) {
   progress.Reset();
+  if (request.operation == Operation::kChecksum) {
+    if (request.sources.size() != 1) {
+      AddError(progress, "Select exactly one file to calculate its checksum.");
+    } else {
+      const std::string algorithm =
+          request.checksum_type == ChecksumType::kMD5 ? "MD5" : "SHA-256";
+      SetText(progress, "Calculating " + algorithm,
+              BaseName(request.sources.front()));
+      std::string checksum;
+      std::string error;
+      if (CalculateChecksum(request.sources.front(), request.checksum_type,
+                            progress, checksum, error)) {
+        std::lock_guard<std::mutex> lock(progress.text_mutex);
+        progress.checksum = std::move(checksum);
+      } else if (!progress.cancel.load()) {
+        AddError(progress, error.empty() ? "Checksum calculation failed." : error);
+      }
+    }
+    progress.cancelled.store(progress.cancel.load());
+    progress.success.store(!progress.cancel.load() && progress.errors.load() == 0);
+    if (!progress.cancel.load() && progress.errors.load() == 0)
+      progress.percent.store(100);
+    SetText(progress, progress.cancel.load()        ? "Cancelled"
+                      : progress.errors.load() == 0 ? "Checksum ready"
+                                                    : "Checksum failed");
+    progress.done.store(true);
+    return;
+  }
   if (request.operation == Operation::kCompress) {
     CompressArchive(request, progress);
     progress.cancelled.store(progress.cancel.load());

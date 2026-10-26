@@ -1323,6 +1323,8 @@ struct ArchiveSourcePicker {
   lv_obj_t* add = nullptr;
   std::string directory;
   std::string excluded;
+  std::string empty_summary;
+  bool single_file = false;
   std::set<std::string> selected;
   std::function<void(std::vector<std::string>)> chosen;
 };
@@ -1358,7 +1360,7 @@ void RenderArchiveSourcePicker(ArchiveSourcePicker* picker) {
   if (picker == nullptr || picker->list == nullptr) return;
   lv_label_set_text(picker->path, picker->directory.c_str());
   const std::string summary = picker->selected.empty()
-      ? i18n::Translate("Select files or hold folders to add")
+      ? i18n::Translate(picker->empty_summary.c_str())
       : i18n::Format("%zu selected", picker->selected.size());
   lv_label_set_text(picker->summary, summary.c_str());
   if (picker->selected.empty()) lv_obj_add_state(picker->add, LV_STATE_DISABLED);
@@ -1380,11 +1382,15 @@ void RenderArchiveSourcePicker(ArchiveSourcePicker* picker) {
       if (entry.directory) {
         picker->directory = entry.path;
       } else if (picker->selected.erase(entry.path) == 0) {
+        if (picker->single_file) picker->selected.clear();
         picker->selected.insert(entry.path);
       }
       RenderArchiveSourcePicker(picker);
     }, [picker, entry] {
-      if (picker->selected.erase(entry.path) == 0) picker->selected.insert(entry.path);
+      if (!entry.directory && picker->selected.erase(entry.path) == 0) {
+        if (picker->single_file) picker->selected.clear();
+        picker->selected.insert(entry.path);
+      }
       RenderArchiveSourcePicker(picker);
     });
     auto* icon = Label(row, entry.directory ? LV_SYMBOL_DIRECTORY : LV_SYMBOL_FILE,
@@ -1406,17 +1412,24 @@ void RenderArchiveSourcePicker(ArchiveSourcePicker* picker) {
 
 void OpenArchiveSourcePicker(Files* state, const std::string& initial,
                              const std::string& excluded,
-                             std::function<void(std::vector<std::string>)> chosen) {
+                             std::function<void(std::vector<std::string>)> chosen,
+                             const char* title = "Add to ZIP",
+                             const char* subtitle = "Choose files or hold folders to select them.",
+                             const char* action_label = "Add selected",
+                             bool single_file = false) {
   auto* overlay = lv_obj_create(state->screen);
   lv_obj_set_user_data(overlay, &kModalMarker);
   Clear(overlay);
   lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
   lv_obj_set_style_bg_color(overlay, kCanvas, 0);
   lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
-  Header(overlay, "Add to ZIP", "Choose files or hold folders to select them.",
+  Header(overlay, title, subtitle,
          state->callback, state->context);
   auto* picker = new ArchiveSourcePicker{state, overlay, nullptr, nullptr, nullptr, nullptr,
-                                         initial, excluded, {}, std::move(chosen)};
+                                         initial, excluded,
+                                         single_file ? "Select one file" :
+                                                       "Select files or hold folders to add",
+                                         single_file, {}, std::move(chosen)};
   lv_obj_add_event_cb(overlay, [](lv_event_t* event) {
     delete static_cast<ArchiveSourcePicker*>(lv_event_get_user_data(event));
   }, LV_EVENT_DELETE, picker);
@@ -1477,9 +1490,11 @@ void OpenArchiveSourcePicker(Files* state, const std::string& initial,
   });
   lv_obj_set_pos(all, 694, toolbar_y);
   lv_obj_set_size(all, 240, 104);
+  if (single_file) lv_obj_add_flag(all, LV_OBJ_FLAG_HIDDEN);
   picker->summary = Label(overlay, "", &lv_font_montserrat_24, kMutedStrong);
-  lv_obj_set_pos(picker->summary, 964, toolbar_y + 32);
-  SingleLineLabel(picker->summary, width - 1028, &lv_font_montserrat_24);
+  lv_obj_set_pos(picker->summary, single_file ? 704 : 964, toolbar_y + 32);
+  SingleLineLabel(picker->summary, width - (single_file ? 768 : 1028),
+                  &lv_font_montserrat_24);
   picker->list = lv_obj_create(overlay);
   Clear(picker->list);
   lv_obj_set_pos(picker->list, 64, list_y);
@@ -1490,7 +1505,7 @@ void OpenArchiveSourcePicker(Files* state, const std::string& initial,
   auto* cancel = Button(overlay, "Cancel", [overlay] { CloseOverlay(overlay); });
   lv_obj_set_pos(cancel, 64, action_y);
   lv_obj_set_size(cancel, (width - 148) / 2, 120);
-  picker->add = Button(overlay, "Add selected", [picker] {
+  picker->add = Button(overlay, action_label, [picker] {
     if (picker->selected.empty()) return;
     std::vector<std::string> selected(picker->selected.begin(), picker->selected.end());
     auto chosen = picker->chosen;
@@ -1755,6 +1770,88 @@ void OpenArchiveBrowser(Files* state, const Entry& archive,
   RenderArchiveBrowser(browser);
 }
 
+const char* ChecksumName(file_manager::ChecksumType type) {
+  return type == file_manager::ChecksumType::kMD5 ? "MD5" : "SHA-256";
+}
+
+void RunChecksumComparison(Files* state, const std::string& reference_path,
+                           const std::string& reference_checksum,
+                           const std::string& candidate_path,
+                           file_manager::ChecksumType type) {
+  file_manager::Request request;
+  request.operation = file_manager::Operation::kChecksum;
+  request.checksum_type = type;
+  request.sources = {candidate_path};
+  StartWork(
+      state, "Comparing checksums", request, false, false,
+      [state, reference_path, reference_checksum, candidate_path,
+       type](const file_manager::Snapshot& snapshot) {
+        if (!snapshot.success || snapshot.checksum.empty()) return;
+        const bool matches = snapshot.checksum == reference_checksum;
+        const std::string details = i18n::Format(
+            "%s\n\n%s\n%s\n\n%s\n%s",
+            ChecksumName(type), file_manager::BaseName(reference_path).c_str(),
+            reference_checksum.c_str(), file_manager::BaseName(candidate_path).c_str(),
+            snapshot.checksum.c_str());
+        Sheet(state->screen,
+              matches ? "Checksums match" : "Checksums do not match",
+              details, Handler{}, 1200, true);
+      });
+}
+
+void ChooseChecksumComparisonFile(Files* state, const std::string& reference_path,
+                                  const std::string& reference_checksum,
+                                  file_manager::ChecksumType type) {
+  OpenArchiveSourcePicker(
+      state, file_manager::Parent(reference_path), reference_path,
+      [state, reference_path, reference_checksum, type](std::vector<std::string> paths) {
+        if (paths.size() != 1) return;
+        RunChecksumComparison(state, reference_path, reference_checksum,
+                              paths.front(), type);
+      },
+      "Compare checksum", "Choose one file to compare with the original.",
+      "Compare", true);
+}
+
+void RunChecksumTask(Files* state, const std::string& path,
+                     file_manager::ChecksumType type) {
+  file_manager::Request request;
+  request.operation = file_manager::Operation::kChecksum;
+  request.checksum_type = type;
+  request.sources = {path};
+  StartWork(
+      state, "Calculating checksum", request, false, false,
+      [state, path, type](const file_manager::Snapshot& snapshot) {
+        if (!snapshot.success || snapshot.checksum.empty()) return;
+        ActionSheet(
+            state, i18n::Format("%s checksum", ChecksumName(type)),
+            snapshot.checksum,
+            {{"Compare file", LV_SYMBOL_LIST,
+              [state, path, type, checksum = snapshot.checksum] {
+                ChooseChecksumComparisonFile(state, path, checksum, type);
+              }}});
+      });
+}
+
+void OpenChecksumMenu(Files* state, const std::string& path) {
+  const auto metadata = file_manager::Inspect(path);
+  if (!metadata.exists || !metadata.regular) {
+    Sheet(state->screen, "Checksum unavailable",
+          "Select one regular file to calculate a checksum.");
+    return;
+  }
+  ActionSheet(
+      state, "Calculate checksum", file_manager::BaseName(path),
+      {{"SHA-256", LV_SYMBOL_SETTINGS,
+        [state, path] {
+          RunChecksumTask(state, path, file_manager::ChecksumType::kSHA256);
+        }},
+       {"MD5", LV_SYMBOL_SETTINGS,
+        [state, path] {
+          RunChecksumTask(state, path, file_manager::ChecksumType::kMD5);
+        }}});
+}
+
 void ChooseCompressionName(Files* state, std::vector<std::string> paths,
                            const std::string& format) {
   if (paths.empty()) return;
@@ -1811,6 +1908,11 @@ void OpenEntryMenu(Files* state, const Entry& entry) {
           { "Delete", LV_SYMBOL_TRASH, [state, entry] { DeletePaths(state, { entry.path }); },
             true },
       };
+  if (!entry.directory && !entry.symlink) {
+    actions.insert(actions.begin() + 4,
+                   {"Checksum", LV_SYMBOL_SETTINGS,
+                    [state, entry] { OpenChecksumMenu(state, entry.path); }});
+  }
   if (!entry.directory && !entry.symlink && file_manager::IsArchiveFile(entry.name)) {
     actions.insert(actions.begin() + 1,
                    {"Browse archive", LV_SYMBOL_LIST,

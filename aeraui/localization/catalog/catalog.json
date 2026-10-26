@@ -73294,6 +73294,130 @@
     "Share, remote path and domain settings": {
       "zh_CN": "共享、远程路径及域设置",
       "zh_TW": "共用、遠端路徑及網域設定"
+    },
+    "ADB sideload": {
+      "zh_CN": "ADB 侧载",
+      "zh_TW": "ADB 側載"
+    },
+    "The previous sideload service is still stopping. Try again in a moment.": {
+      "zh_CN": "上一次侧载服务仍在停止中，请稍后重试。",
+      "zh_TW": "上一次側載服務仍在停止中，請稍後重試。"
+    },
+    "%s\n\n%s\n%s\n\n%s\n%s": {
+      "zh_CN": "%s\n\n%s\n%s\n\n%s\n%s",
+      "zh_TW": "%s\n\n%s\n%s\n\n%s\n%s"
+    },
+    "%s checksum": {
+      "zh_CN": "%s 校验和",
+      "zh_TW": "%s 校驗和"
+    },
+    "Calculate checksum": {
+      "zh_CN": "计算校验和",
+      "zh_TW": "計算校驗和"
+    },
+    "Calculating checksum": {
+      "zh_CN": "正在计算校验和",
+      "zh_TW": "正在計算校驗和"
+    },
+    "Checksum": {
+      "zh_CN": "校验和",
+      "zh_TW": "校驗和"
+    },
+    "Checksum unavailable": {
+      "zh_CN": "无法计算校验和",
+      "zh_TW": "無法計算校驗和"
+    },
+    "Checksums do not match": {
+      "zh_CN": "校验和不匹配",
+      "zh_TW": "校驗和不符"
+    },
+    "Checksums match": {
+      "zh_CN": "校验和匹配",
+      "zh_TW": "校驗和相符"
+    },
+    "Choose one file to compare with the original.": {
+      "zh_CN": "选择一个文件与原文件比较。",
+      "zh_TW": "選擇一個檔案與原始檔案比較。"
+    },
+    "Compare": {
+      "zh_CN": "比较",
+      "zh_TW": "比較"
+    },
+    "Compare checksum": {
+      "zh_CN": "比较校验和",
+      "zh_TW": "比較校驗和"
+    },
+    "Compare file": {
+      "zh_CN": "比较文件",
+      "zh_TW": "比較檔案"
+    },
+    "Comparing checksums": {
+      "zh_CN": "正在比较校验和",
+      "zh_TW": "正在比較校驗和"
+    },
+    "MD5": {
+      "zh_CN": "MD5",
+      "zh_TW": "MD5"
+    },
+    "SHA-256": {
+      "zh_CN": "SHA-256",
+      "zh_TW": "SHA-256"
+    },
+    "Select one file": {
+      "zh_CN": "选择一个文件",
+      "zh_TW": "選擇一個檔案"
+    },
+    "Select one regular file to calculate a checksum.": {
+      "zh_CN": "选择一个普通文件以计算校验和。",
+      "zh_TW": "選擇一個一般檔案以計算校驗和。"
+    },
+    "Calculating ": {
+      "zh_CN": "正在计算 ",
+      "zh_TW": "正在計算 "
+    },
+    "Cannot open file for checksum": {
+      "zh_CN": "无法打开文件以计算校验和",
+      "zh_TW": "無法開啟檔案以計算校驗和"
+    },
+    "Cannot read file for checksum": {
+      "zh_CN": "无法读取文件以计算校验和",
+      "zh_TW": "無法讀取檔案以計算校驗和"
+    },
+    "Checksum calculation failed.": {
+      "zh_CN": "校验和计算失败。",
+      "zh_TW": "校驗和計算失敗。"
+    },
+    "Checksum failed": {
+      "zh_CN": "校验和计算失败",
+      "zh_TW": "校驗和計算失敗"
+    },
+    "Checksum ready": {
+      "zh_CN": "校验和已就绪",
+      "zh_TW": "校驗和已就緒"
+    },
+    "Checksums can only be calculated for regular files.": {
+      "zh_CN": "只能为普通文件计算校验和。",
+      "zh_TW": "只能為一般檔案計算校驗和。"
+    },
+    "Could not finalize the checksum.": {
+      "zh_CN": "无法完成校验和计算。",
+      "zh_TW": "無法完成校驗和計算。"
+    },
+    "Could not initialize the checksum calculator.": {
+      "zh_CN": "无法初始化校验和计算器。",
+      "zh_TW": "無法初始化校驗和計算器。"
+    },
+    "Could not update the checksum.": {
+      "zh_CN": "无法更新校验和。",
+      "zh_TW": "無法更新校驗和。"
+    },
+    "Select exactly one file to calculate its checksum.": {
+      "zh_CN": "请选择且仅选择一个文件来计算校验和。",
+      "zh_TW": "請只選擇一個檔案來計算校驗和。"
+    },
+    "The selected checksum source is no longer a regular file.": {
+      "zh_CN": "所选校验和源文件已不再是普通文件。",
+      "zh_TW": "所選的校驗和來源檔案已不再是一般檔案。"
     }
   }
 }

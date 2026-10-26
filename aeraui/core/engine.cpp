@@ -3415,6 +3415,11 @@ private:
           "Finish or cancel background plugin storage tasks first.");
       return;
     }
+    if (request.job == Job::kSideload && !RecoveryPrepareSideload()) {
+      widgets::Sheet(lv_screen_active(), "ADB sideload",
+          "The previous sideload service is still stopping. Try again in a moment.");
+      return;
+    }
     DismissPowerMenu();
     operation_visible_ = request.show_on_device;
     operation_started_ms_ = MonotonicMilliseconds();
@@ -3445,6 +3450,7 @@ private:
       if (request.present_before_run)
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
       const int result = RecoveryRunJob(request);
+      if (request.job == Job::kSideload) RecoveryFinishSideload();
       operation_finished_ms_.store(MonotonicMilliseconds(), std::memory_order_release);
       if (backup_token_) aera::backup::Operations().Finish(backup_token_);
       operation_result_.store(result, std::memory_order_release);
