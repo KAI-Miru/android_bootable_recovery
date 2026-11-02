@@ -689,6 +689,8 @@ int main(int argc, char **argv) {
 
 	// start the UI
 	printf("Starting the UI...\n");
+    // Capture before native UI, installers or live fastbootd can write ABL.
+    aeraui::RecoveryCaptureEfispAblBaseline();
 	gui_init();
 
 	if (!startup.Get_Fastboot_Mode()) PartitionManager.Setup_Fstab_Partitions(true);

@@ -21,7 +21,11 @@
 
 #include <stdio.h>
 #include "aera_image_flash_batch.hpp"
+#include "aera_image_flash_geometry.hpp"
+#include "aera_image_flash_layout.hpp"
+#include <libdm/dm.h>
 #include "aera_frp_wipe.hpp"
+#include "aera_efisp.hpp"
 #include "aera_remote/backup_cancel.hpp"
 #include "aera_image_flash_mounts.hpp"
 #include "aera_mobile/client.hpp"
@@ -367,37 +371,6 @@ bool QuiesceDynamicPartitionUsers(bool stop_bootstrap = false,
 			if (saved.target == mount) saved.removed = true;
 	}
 	return true;
-}
-
-bool RestoreFlashMount(const aera::FlashMount& saved) {
-	const auto flags = aera::FlashMountFlags(saved.options + "," + saved.super_options);
-	const auto options = aera::FlashFilesystemOptions(saved.super_options);
-	if (saved.root == "/") {
-		if (mount(saved.source.c_str(), saved.target.c_str(), saved.type.c_str(), flags, options.c_str())) return false;
-	} else {
-		// A mountinfo root other than / represents a directory/file bind. Mount
-		// the filesystem privately, recreate the bind, then remove the staging
-		// mount. No descriptors are retained while the partition is flashed.
-		char temporary[] = "/tmp/aera-flash-mount-XXXXXX";
-		if (!mkdtemp(temporary)) return false;
-		if (mount(saved.source.c_str(), temporary, saved.type.c_str(), flags, options.c_str())) {
-			const int error = errno; rmdir(temporary); errno = error; return false;
-		}
-		bool ok = mount(nullptr, temporary, nullptr, MS_PRIVATE, nullptr) == 0;
-		const std::string source = std::string(temporary) + saved.root;
-		if (ok) ok = mount(source.c_str(), saved.target.c_str(), nullptr, MS_BIND, nullptr) == 0;
-		if (ok && mount(nullptr, saved.target.c_str(), nullptr, MS_BIND | MS_REMOUNT | flags, nullptr)) {
-			const int error = errno; umount2(saved.target.c_str(), 0); errno = error; ok = false;
-		}
-		const int error = errno;
-		if (umount2(temporary, 0)) {
-			LOGERR("Unable to remove staging mount %s: %s\n", temporary, strerror(errno));
-			return false;
-		}
-		rmdir(temporary);
-		if (!ok) { errno = error; return false; }
-	}
-	return mount(nullptr, saved.target.c_str(), nullptr, saved.propagation, nullptr) == 0;
 }
 
 }  // namespace
@@ -803,6 +776,7 @@ clear:
 }
 
 void TWPartitionManager::Setup_Fstab_Partitions(bool Display_Error) {
+        Add_Efisp_Partition();
 		TWPartition* settings_partition = NULL;
 		TWPartition* andsec_partition = NULL;
 		std::vector<TWPartition*>::iterator iter;
@@ -936,6 +910,45 @@ bool TWPartitionManager::Is_NAS_Path(const std::string& Path) {
 	const std::string nas = TW_NAS_MOUNT_POINT;
 
 	return Path == nas || Path.compare(0, nas.size() + 1, nas + "/") == 0;
+}
+
+void TWPartitionManager::Add_Efisp_Partition() {
+    TWPartition* part = Find_Partition_By_Path("/efisp");
+    aera_efisp::Target target;
+    if (!aera_efisp::Discover(&target)) {
+        if (part) {
+            part->Can_Be_Backed_Up = part->Can_Be_Adv_Backed_Up = false;
+            part->Wipe_Available_in_GUI = part->Can_Flash_Img = false;
+        }
+        return;
+    }
+    if (!part) {
+        part = new TWPartition();
+        const std::string entry = "/efisp emmc " + target.path + " flags=backup=1";
+        if (!part->Process_Fstab_Line(entry.c_str(), false, nullptr)) { delete part; return; }
+        Add_Partition(part);
+    }
+    part->Mount_Point = part->Backup_Path = "/efisp";
+    part->Backup_Name = "efisp";
+    part->Display_Name = part->Backup_Display_Name = "EFISP";
+    part->Actual_Block_Device = part->Primary_Block_Device = target.path;
+    part->Alternate_Block_Device.clear();
+    part->Current_File_System = part->Fstab_File_System = "emmc";
+    part->Backup_Method = BM_DD;
+    part->Size = part->Used = part->Backup_Size = target.bytes;
+    part->Is_Present = part->Can_Be_Backed_Up = part->Wipe_Available_in_GUI = true;
+    part->Can_Be_Mounted = part->Is_Storage = part->Can_Flash_Img = false;
+    part->Can_Be_Wiped = part->Wipe_During_Factory_Reset = false;
+    part->SlotSelect = part->Is_SubPartition = part->Has_SubPartition = false;
+}
+
+bool TWPartitionManager::Wipe_Efisp_Partition(const std::string& confirmation) {
+    aera::mobile::StorageLease mobile_lease;
+    if (!mobile_lease) return false;
+    const bool ok = aera_efisp::Wipe(confirmation);
+    if (!ok) LOGERR("EFISP wipe refused or erase/readback failed.\n");
+    else gui_print("EFISP erased. Format Data is required before booting Android.\n");
+    return ok;
 }
 
 void TWPartitionManager::Add_PC_Storage() {
@@ -2199,6 +2212,11 @@ unsigned long long TWPartitionManager::Get_Restore_Size(
 }
 
 int TWPartitionManager::Wipe_By_Path(string Path) {
+    // This partition requires the dedicated, acknowledged operation.
+    if (TWFunc::Get_Root_Path(Path) == "/efisp") {
+        LOGERR("EFISP wipe requires acknowledgement of the Format Data warning.\n");
+        return false;
+    }
   aera::mobile::StorageLease mobile_lease;
   if (!mobile_lease) return false;
 	// FRP is never a filesystem wipe and is opt-in at build time.
@@ -2261,6 +2279,7 @@ int TWPartitionManager::Wipe_By_Path(string Path) {
 }
 
 int TWPartitionManager::Wipe_By_Path(string Path, string New_File_System) {
+    if (TWFunc::Get_Root_Path(Path) == "/efisp") return false;
   aera::mobile::StorageLease mobile_lease;
   if (!mobile_lease) return false;
 	if (TWFunc::Get_Root_Path(Path) == "/frp") {
@@ -3344,6 +3363,7 @@ void TWPartitionManager::Get_Partition_List(string ListType,
 					    std::vector < PartitionList >
 					    *Partition_List)
 {
+  Add_Efisp_Partition();
   std::vector < TWPartition * >::iterator iter;
   if (ListType == "mount")
     {
@@ -3447,7 +3467,7 @@ void TWPartitionManager::Get_Partition_List(string ListType,
 					break;
 				}
 				if ((restore_part = Find_Partition_By_Path(restore_path)) != NULL) {
-					if ((restore_part->Backup_Name == "recovery" && !restore_part->Can_Be_Backed_Up) || restore_part->Is_SubPartition) {
+					if ((restore_part->Backup_Name == "recovery" && !restore_part->Can_Be_Backed_Up) || (restore_path == "/efisp" && !restore_part->Can_Be_Backed_Up) || restore_part->Is_SubPartition) {
 						// Don't allow restore of recovery (causes problems on some devices)
 						// Don't add subpartitions to the list of items
 					} else {
@@ -3869,12 +3889,45 @@ bool AeraMapLogicalPartition(const std::string& super_device, uint32_t metadata_
 	return android::fs_mgr::CreateLogicalPartition(params, mapped_path);
 }
 
-bool AeraGrowLogicalPartition(TWPartitionManager* manager, TWPartition* twrp_part,
+bool AeraSnapshotStateIdle(TWPartitionManager* manager, bool has_cows = false) {
+	if (!has_cows && !android::base::GetBoolProperty("ro.virtual_ab.enabled", false) &&
+		!android::base::GetBoolProperty("ro.aera.virtual_ab", false) &&
+		!android::base::GetBoolProperty("ro.virtual_ab.userspace.snapshots.enabled", false)) return true;
+	auto* metadata = manager->Find_Partition_By_Path("/metadata");
+	if (!metadata || !metadata->Mount(false)) return false;
+	// GetUpdateState() treats unreadable/corrupt state as None. Verify the
+	// state file ourselves as well, so missing metadata never authorizes erasure.
+	android::base::unique_fd fd(open("/metadata/ota/state", O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+	if (fd < 0) {
+		if (errno != ENOENT) return false;
+	} else {
+		struct stat st{};
+		std::string state;
+		if (fstat(fd.get(), &st) || !S_ISREG(st.st_mode) || st.st_size > 65536 ||
+			!android::base::ReadFdToString(fd.get(), &state)) return false;
+		android::snapshot::SnapshotUpdateStatus status;
+		if (status.ParseFromString(state)) {
+			if (status.state() != android::snapshot::UpdateState::None) return false;
+		} else if (state != "none") return false; // Legacy libsnapshot format.
+	}
+	auto snapshots = android::snapshot::SnapshotManager::NewForFirstStageMount();
+	if (!snapshots || snapshots->GetUpdateState() != android::snapshot::UpdateState::None ||
+		!snapshots->IsCancelUpdateSafe()) return false;
+#ifdef AB_OTA_UPDATER
+	const auto boot = BootControlClient::WaitForService();
+	if (!boot) return false;
+	const auto merge = boot->getSnapshotMergeStatus();
+	using MergeStatus = aidl::android::hardware::boot::MergeStatus;
+	if (merge != MergeStatus::NONE && merge != MergeStatus::CANCELLED) return false;
+#endif
+	return true;
+}
+
+bool AeraResizeLogicalPartition(TWPartitionManager* manager, TWPartition* twrp_part,
 							  uint64_t requested_size) {
 	if (!manager || !twrp_part || !twrp_part->Get_Super_Status())
 		return false;
-	auto snapshots = android::snapshot::SnapshotManager::NewForFirstStageMount();
-	if (snapshots && snapshots->GetUpdateState() != android::snapshot::UpdateState::None) {
+	if (!AeraSnapshotStateIdle(manager)) {
 		LOGERR("Refusing to resize a logical partition while a snapshot update is active\n");
 		gui_err("Logical partitions cannot be resized while an Android snapshot update is active.");
 		return false;
@@ -3904,13 +3957,16 @@ bool AeraGrowLogicalPartition(TWPartitionManager* manager, TWPartition* twrp_par
 		return false;
 	}
 	const uint64_t current_size = logical->size();
-	if (requested_size <= logical->size())
+	if (requested_size == current_size)
 		return true;
 	if (!builder->ResizePartition(logical, requested_size)) {
-		LOGERR("Not enough free space in logical group to grow '%s' from %llu to %llu bytes\n",
-			partition_name.c_str(), static_cast<unsigned long long>(logical->size()),
+		LOGERR("Unable to resize logical partition '%s' from %llu to %llu bytes\n",
+			partition_name.c_str(), static_cast<unsigned long long>(current_size),
 			static_cast<unsigned long long>(requested_size));
-		gui_err("The image is larger than the logical partition and its Super group has insufficient free space.");
+		if (requested_size > current_size)
+			gui_err("The image is larger than the logical partition and its Super group has insufficient free space.");
+		else
+			gui_err("Unable to shrink the logical partition to the image size.");
 		return false;
 	}
 	auto updated = builder->Export();
@@ -3965,9 +4021,9 @@ bool AeraGrowLogicalPartition(TWPartitionManager* manager, TWPartition* twrp_par
 	}
 	twrp_part->Set_Block_Device(mapped_path);
 	twrp_part->Update_Size(true);
-	LOGINFO("AERA grew logical partition '%s' from %llu to %llu bytes\n",
+	LOGINFO("AERA resized logical partition '%s' from %llu to %llu bytes\n",
 		partition_name.c_str(), static_cast<unsigned long long>(current_size),
-		static_cast<unsigned long long>(requested_size));
+		static_cast<unsigned long long>(logical->size()));
 	return true;
 }
 
@@ -4044,15 +4100,18 @@ bool TWPartitionManager::Flash_Image_To_Block(const std::string& path,
 }
 
 bool TWPartitionManager::Run_Image_Flash_Batch(const std::vector<std::string>& targets,
-        const std::function<bool()>& operation) {
+        const std::function<bool()>& operation, const std::function<bool()>& writer_started,
+        std::string* error) {
 	if (image_flash_batch_ || !operation) return false;
 	std::set<dev_t> physical_devices;
+	bool has_logical_targets = false;
 	for (const auto& target : targets) {
+		if (target.rfind("/logical/", 0) == 0) { has_logical_targets = true; continue; }
 		std::string block = target;
 		if (target.compare(0, 11, "/dev/block/") != 0) {
 			auto* part = Find_Partition_By_Path(target);
 			if (!part) return false;
-			if (part->Get_Super_Status()) continue;
+			if (part->Get_Super_Status()) { has_logical_targets = true; continue; }
 			part->Find_Actual_Block_Device();
 			block = part->Actual_Block_Device;
 		}
@@ -4064,17 +4123,94 @@ bool TWPartitionManager::Run_Image_Flash_Batch(const std::vector<std::string>& t
 		physical_devices.insert(st.st_rdev);
 	}
 	std::vector<aera::FlashMount> physical_mounts;
+	std::unique_ptr<android::fs_mgr::LpMetadata> original_metadata;
+	const auto slot_suffix = Get_Active_Slot_Suffix();
+	const auto metadata_slot = slot_suffix.empty() ? 0 : android::fs_mgr::SlotNumberForSlotSuffix(slot_suffix);
+	const auto super_device = Get_Super_Partition();
+	image_flash_resized_.clear();
+	image_flash_metadata_changed_ = false;
+	image_flash_unmapped_cows_.clear();
+	image_flash_layout_mappings_.clear();
+	image_flash_original_mappings_.clear();
+	auto rollback = [&] {
+		if (!original_metadata || (image_flash_resized_.empty() && !image_flash_metadata_changed_ &&
+			image_flash_unmapped_cows_.empty() && image_flash_layout_mappings_.empty())) return;
+		std::vector<std::pair<TWPartition*, std::string>> mappings;
+		for (auto* part : image_flash_resized_) {
+			const auto bare = Get_Bare_Partition_Name(part->Get_Mount_Point());
+			auto name = bare + slot_suffix;
+			auto exists = [&](const std::string& candidate) {
+				return std::any_of(original_metadata->partitions.begin(), original_metadata->partitions.end(),
+					[&](const auto& entry) { return android::fs_mgr::GetPartitionName(entry) == candidate; });
+			};
+			if (!exists(name)) name = bare;
+			if (!exists(name)) {
+				LOGERR("Cannot identify original logical target for preparation rollback: %s\n", bare.c_str());
+				if (error) *error += ". Cannot identify a logical target for Super metadata rollback";
+				return;
+			}
+			mappings.emplace_back(part, name);
+		}
+		bool released = true;
+		for (const auto& name : image_flash_layout_mappings_) {
+			std::string block;
+			if (android::dm::DeviceMapper::Instance().GetDmDevicePathByName(name, &block) && !DestroyLogicalPartition(name)) released = false;
+		}
+		for (const auto& entry : mappings)
+			if (!DestroyLogicalPartition(entry.second)) released = false;
+		const bool restored = released &&
+			android::fs_mgr::UpdatePartitionTable(super_device, *original_metadata, metadata_slot);
+		bool remapped = true;
+		for (const auto& entry : mappings) {
+			std::string block;
+			if (!AeraMapLogicalPartition(super_device, metadata_slot, entry.second, &block)) {
+				remapped = false;
+				continue;
+			}
+			entry.first->Set_Block_Device(block);
+			entry.first->Update_Size(true);
+		}
+		for (const auto& name : image_flash_original_mappings_) {
+			const bool existed = std::any_of(original_metadata->partitions.begin(), original_metadata->partitions.end(),
+				[&](const auto& entry) { return android::fs_mgr::GetPartitionName(entry) == name; });
+			if (!existed) continue;
+			std::string block;
+			if (!AeraMapLogicalPartition(super_device, metadata_slot, name, &block)) remapped = false;
+		}
+		for (const auto& name : image_flash_unmapped_cows_) {
+			std::string block;
+			if (!AeraMapLogicalPartition(super_device, metadata_slot, name, &block)) remapped = false;
+		}
+		if (!restored || !remapped) {
+			const std::string message = "Could not fully restore original Super metadata/mappings after preparation failed; keep recovery running";
+			LOGERR("%s\n", message.c_str());
+			gui_err(message.c_str());
+			if (error) *error += ". " + message;
+		} else {
+			LOGINFO("Restored original Super metadata and %zu logical mappings before any image writes\n", mappings.size());
+		}
+	};
 	const bool replay = android::base::GetBoolProperty("post.decrypt.modules", false);
-	return aera::RunImageFlashBatch(image_flash_batch_, [&] {
+	return aera::RunPreparedImageFlashBatch(image_flash_batch_, [&] {
 		LOGINFO("Payload batch: releasing logical and selected physical dependencies once\n");
-		return QuiesceDynamicPartitionUsers(true, physical_devices, &physical_mounts);
+		if (!QuiesceDynamicPartitionUsers(true, physical_devices, &physical_mounts)) return false;
+		// Save the complete table, including original extents. Resizing back to
+		// old byte counts would not guarantee the same physical block mapping.
+		if (writer_started && has_logical_targets) {
+			original_metadata = android::fs_mgr::ReadMetadata(super_device, metadata_slot);
+			if (!original_metadata) {
+				if (error) *error = "Cannot checkpoint Super metadata before preparation";
+				return false;
+			}
+		}
+		return true;
 	}, operation, [&] {
 		// No per-image remount, property replay or service restart in this scope.
 		// The operation's exclusive block handles have already been destroyed.
 		// Restore parents before children, including on a partial preparation failure.
 		for (auto it = physical_mounts.rbegin(); it != physical_mounts.rend(); ++it) {
 			if (!it->removed) continue;
-			if (!RestoreFlashMount(*it)) {
+			if (!aera::RestoreFlashMount(*it)) {
 				LOGERR("Could not restore %s after payload batch: %s\n", it->target.c_str(), strerror(errno));
 				gui_msg(Msg(msg::kError, "Could not restore {1}; reboot recovery before using its services.")(it->target));
 			} else LOGINFO("Restored image-flash mount: %s\n", it->target.c_str());
@@ -4086,16 +4222,198 @@ bool TWPartitionManager::Run_Image_Flash_Batch(const std::vector<std::string>& t
 			property_set("post.decrypt.modules", "true");
 		}
 		Restart_Quiesced_Dynamic_Services();
-	});
+		image_flash_resized_.clear();
+		image_flash_metadata_changed_ = false;
+		image_flash_unmapped_cows_.clear();
+		image_flash_layout_mappings_.clear();
+		image_flash_original_mappings_.clear();
+	}, [&] { return !writer_started || writer_started(); }, rollback);
+}
+
+bool TWPartitionManager::Validate_Image_Flash_Target(const std::string& target, uint64_t bytes,
+        uint64_t* current_bytes) {
+	if (!bytes || bytes > INT64_MAX) return false;
+	auto* part = Find_Partition_By_Path(target);
+	if (!part) return false;
+	const bool logical = part->Get_Super_Status();
+	if (logical) {
+		if (bytes % 512) return false;
+		// A valid logical target need not be mapped yet. Inspect Super metadata
+		// without creating/remapping anything during this read-only preflight.
+		const auto suffix = Get_Active_Slot_Suffix();
+		auto builder = MetadataBuilder::New(Get_Super_Partition(), android::fs_mgr::SlotNumberForSlotSuffix(suffix));
+		if (!builder) return false;
+		const auto bare = Get_Bare_Partition_Name(part->Get_Mount_Point());
+		auto entry = builder->FindPartition(bare + suffix);
+		if (!entry) entry = builder->FindPartition(bare);
+		if (!entry) return false;
+		if (current_bytes) *current_bytes = entry->size();
+		return true;
+	}
+	if (!logical && (!part->Can_Flash_Img || part->Backup_Method != BM_DD || !part->Is_SlotSelect())) return false;
+	part->Find_Actual_Block_Device();
+	const int fd = open(part->Actual_Block_Device.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+	uint64_t capacity = 0;
+	bool mapped = false;
+	int readonly = 1;
+	const bool ok = fd >= 0 && aera::ImageFlashGeometry(fd, capacity, mapped) && !mapped &&
+		bytes <= capacity && !ioctl(fd, BLKROGET, &readonly) && !readonly;
+	if (fd >= 0) close(fd);
+	if (ok && current_bytes) *current_bytes = capacity;
+	return ok;
+}
+
+bool TWPartitionManager::Prepare_Image_Flash_Targets(const std::vector<std::string>& targets,
+        const std::vector<uint64_t>& bytes, std::vector<std::string>* blocks, std::string* error, const aera::RomImageLayout* layout) {
+	if (!image_flash_batch_ || !blocks || targets.empty() || targets.size() != bytes.size()) return false;
+	auto fail = [&](const std::string& message) {
+		LOGERR("%s\n", message.c_str());
+		if (error) *error = message;
+		return false;
+	};
+	blocks->assign(targets.size(), {});
+	std::vector<TWPartition*> parts(targets.size(), nullptr);
+	std::vector<aera::LogicalImageSize> images;
+	const auto suffix = Get_Active_Slot_Suffix();
+	const auto slot = suffix.empty() ? 0 : android::fs_mgr::SlotNumberForSlotSuffix(suffix);
+	const auto super = Get_Super_Partition();
+	std::unique_ptr<MetadataBuilder> builder;
+	for (size_t i = 0; i < targets.size(); ++i) {
+		if (targets[i].compare(0, 11, "/dev/block/") == 0) {
+			(*blocks)[i] = targets[i]; // Exclusively claimed and checked by caller before writing.
+			continue;
+		}
+		if (targets[i].rfind("/logical/", 0) == 0) {
+			const auto bare = targets[i].substr(9);
+			if (bare.empty() || bare.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != std::string::npos ||
+				!bytes[i] || bytes[i] % 512) return fail("Invalid package logical target");
+			if (!builder) builder = MetadataBuilder::New(super, slot);
+			if (!builder) return fail("Cannot read Super metadata");
+			if (!layout && !builder->FindPartition(bare + suffix)) return fail("Missing logical partition; applying ROM layout is required: " + bare);
+			images.push_back({bare + suffix, bytes[i]});
+			continue;
+		}
+		if (!Validate_Image_Flash_Target(targets[i], bytes[i]))
+			return fail("Invalid image flash target: " + targets[i]);
+		parts[i] = Find_Partition_By_Path(targets[i]);
+		if (!parts[i]->Get_Super_Status()) continue;
+		if (!builder) builder = MetadataBuilder::New(super, slot);
+		if (!builder) return fail("Cannot read Super metadata for the image batch");
+		const auto bare = Get_Bare_Partition_Name(parts[i]->Get_Mount_Point());
+		auto name = bare + suffix;
+		if (!builder->FindPartition(name)) name = bare;
+		if (!builder->FindPartition(name)) return fail("Missing logical target: " + bare);
+		images.push_back({name, bytes[i]});
+	}
+	if (builder) {
+		std::vector<std::string> cows;
+		for (const auto* part : builder->ListPartitionsInGroup("cow")) {
+			const auto& name = part->name();
+			if (name.size() > 4 && name.compare(name.size() - 4, 4, "-cow") == 0) cows.push_back(name);
+		}
+		if (!AeraSnapshotStateIdle(this, !cows.empty()))
+			return fail("OTA snapshots are active or their state cannot be verified; no images written");
+		if (layout) {
+			std::set<std::string> affected;
+			for (const auto& group : builder->ListGroups()) for (const auto* part : builder->ListPartitionsInGroup(group)) {
+				const auto& name = part->name();
+				if (name.size() > suffix.size() && name.compare(name.size()-suffix.size(), suffix.size(), suffix) == 0) affected.insert(name);
+			}
+			for (const auto& image : images) affected.insert(image.name);
+			std::string planning_error;
+			if (!aera::PlanRomImageLayout(*builder, *layout, suffix, images, planning_error)) return fail(planning_error);
+			image_flash_layout_mappings_.assign(affected.begin(), affected.end());
+		}
+		std::vector<std::string> changed;
+		for (const auto& image : images)
+			if (builder->FindPartition(image.name)->size() != image.bytes) changed.push_back(image.name);
+		if (!layout) for (size_t i = 0; i < targets.size(); ++i) {
+			if (targets[i].rfind("/logical/", 0) != 0) continue;
+			const auto name = targets[i].substr(9) + suffix;
+			if (std::find(changed.begin(), changed.end(), name) != changed.end()) image_flash_layout_mappings_.push_back(name);
+		}
+		std::string planning_error;
+		if (!aera::PlanImageFlashLayout(*builder, images, cows, planning_error)) return fail(planning_error);
+		auto updated = builder->Export();
+		if (!updated) return fail("The complete image layout exceeds Super metadata/group limits");
+		if (layout || !changed.empty() || !cows.empty()) {
+			// Record every changed mapping before touching any of them. The outer
+			// batch restores the original complete table/extents if preparation fails.
+			for (auto* part : parts) {
+				if (!part || !part->Get_Super_Status()) continue;
+				const auto bare = Get_Bare_Partition_Name(part->Get_Mount_Point());
+				if (std::find(changed.begin(), changed.end(), bare + suffix) != changed.end() ||
+					std::find(changed.begin(), changed.end(), bare) != changed.end())
+					image_flash_resized_.push_back(part);
+			}
+			for (const auto& name : image_flash_layout_mappings_) {
+				std::string mapped;
+				if (android::dm::DeviceMapper::Instance().GetDmDevicePathByName(name, &mapped)) {
+					image_flash_original_mappings_.push_back(name);
+					if (!DestroyLogicalPartition(name)) return fail("Cannot release ROM layout target: " + name);
+				}
+			}
+			for (const auto& name : changed)
+				if (std::find(image_flash_layout_mappings_.begin(), image_flash_layout_mappings_.end(), name) == image_flash_layout_mappings_.end() &&
+					!DestroyLogicalPartition(name)) return fail("Cannot release logical target: " + name);
+			for (const auto& name : cows) {
+				struct stat st{};
+				if (!lstat(("/dev/block/mapper/" + name).c_str(), &st)) {
+					if (!DestroyLogicalPartition(name)) return fail("Stale COW is still in use: " + name);
+					image_flash_unmapped_cows_.push_back(name);
+				}
+			}
+			// Recheck immediately before the single metadata commit. Never cancel
+			// a live update, remove another slot, or increase group size limits.
+			if (!AeraSnapshotStateIdle(this, !cows.empty())) return fail("Snapshot state changed before preparation");
+			image_flash_metadata_changed_ = true;
+			if (!android::fs_mgr::UpdatePartitionTable(super, *updated, slot))
+				return fail("Cannot commit the prepared Super layout");
+			std::vector<std::string> remap = changed;
+			if (layout) {
+				remap.clear();
+				for (const auto& image : images) remap.push_back(image.name);
+			}
+			for (const auto& name : remap) {
+				std::string block;
+				if (!AeraMapLogicalPartition(super, slot, name, &block)) return fail("Cannot map prepared target: " + name);
+				for (auto* part : image_flash_resized_) {
+					const auto bare = Get_Bare_Partition_Name(part->Get_Mount_Point());
+					if (name == bare || name == bare + suffix) part->Set_Block_Device(block);
+				}
+				LOGINFO("AERA prepared logical target '%s' (%llu bytes)\n", name.c_str(),
+					static_cast<unsigned long long>(builder->FindPartition(name)->size()));
+			}
+			for (const auto& name : cows) LOGINFO("AERA reclaimed stale snapshot COW '%s' for image flashing\n", name.c_str());
+		}
+	}
+	for (size_t i = 0; i < parts.size(); ++i) {
+		if (targets[i].rfind("/logical/", 0) == 0) {
+			const auto name = targets[i].substr(9) + suffix;
+			if (!android::dm::DeviceMapper::Instance().GetDmDevicePathByName(name, &(*blocks)[i]) &&
+				!AeraMapLogicalPartition(super, slot, name, &(*blocks)[i]))
+				return fail("Cannot map ROM image target");
+			continue;
+		}
+		if (!parts[i]) continue;
+		parts[i]->Find_Actual_Block_Device();
+		parts[i]->Update_Size(true);
+		(*blocks)[i] = parts[i]->Actual_Block_Device;
+		if ((*blocks)[i].empty()) return fail("Prepared target has no block device: " + targets[i]);
+	}
+	return true;
 }
 
 bool TWPartitionManager::Prepare_Image_Flash_Target(const std::string& target,
         uint64_t bytes, std::string* block) {
-	if (!image_flash_batch_ || !block || !bytes || bytes > INT64_MAX) return false;
+	uint64_t capacity = 0;
+	if (!image_flash_batch_ || !block || !Validate_Image_Flash_Target(target, bytes, &capacity)) return false;
 	auto* part = Find_Partition_By_Path(target);
 	if (!part) return false;
 	if (part->Get_Super_Status()) {
-		if (!part->UnMount(true) || !AeraGrowLogicalPartition(this, part, bytes)) return false;
+		if (capacity != bytes && std::find(image_flash_resized_.begin(), image_flash_resized_.end(), part) == image_flash_resized_.end())
+			image_flash_resized_.push_back(part);
+		if (!part->UnMount(true) || !AeraResizeLogicalPartition(this, part, bytes)) return false;
 	} else if (!part->Can_Flash_Img || part->Backup_Method != BM_DD || !part->Is_SlotSelect()) {
 		return false;
 	}
@@ -4221,7 +4539,7 @@ bool TWPartitionManager::Flash_Image(string& path, string& filename,
 			restore_dynamic_dependencies();
 			return false;
 		}
-		if (logical && !AeraGrowLogicalPartition(this, flash_part, expanded_size)) {
+		if (logical && !AeraResizeLogicalPartition(this, flash_part, expanded_size)) {
 			if (remount)
 				flash_part->Mount(false);
 			restore_dynamic_dependencies();
@@ -5582,9 +5900,7 @@ bool TWPartitionManager::Get_Snapshot_Cow_Partitions(
 	std::sort(partitions->begin(), partitions->end(),
 		[](const auto& left, const auto& right) { return left.name < right.name; });
 
-	auto snapshots = android::snapshot::SnapshotManager::NewForFirstStageMount();
-	*safe_to_remove = !snapshots ||
-		snapshots->GetUpdateState() == android::snapshot::UpdateState::None;
+	*safe_to_remove = AeraSnapshotStateIdle(this, !partitions->empty());
 	return true;
 }
 

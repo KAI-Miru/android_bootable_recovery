@@ -16,9 +16,10 @@ find_package(JPEG REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)
 target_link_libraries(lvgl PUBLIC Freetype::Freetype)
-add_executable(ui_check ui_check.cpp plugin_runtime_ui_test.cpp
+add_executable(ui_check ui_check.cpp plugin_runtime_ui_test.cpp telegram_session_ui_test.cpp
   ../components/plugin_desktop.cpp
   ../features/plugin_api/session.cpp ../features/plugin_api/activity.cpp
+  ../scenes/android_adb_rescue_scene.cpp
   ../scenes/developer_scene.cpp
   ../scenes/mobile_data_scene.cpp
   ../scenes/update_scene.cpp
@@ -44,13 +45,14 @@ add_executable(ui_check ui_check.cpp plugin_runtime_ui_test.cpp
   ../scenes/wifi_scene.cpp ../components/picture_decode.cpp
   ../components/picture_viewer.cpp ../components/wallpaper.cpp
   ../scenes/operation_scene.cpp
-  ../scenes/decrypt_scene.cpp ../scenes/lock_scene.cpp ../features/browser/web_scene.cpp
-  ../features/browser/session.cpp ../features/browser/launcher.cpp)
+  ../scenes/decrypt_scene.cpp ../features/browser/web_scene.cpp
+  ../features/browser/session.cpp ../features/browser/launcher.cpp
+  ../scenes/telegram_scene.cpp ../features/telegram/launcher.cpp)
 target_include_directories(ui_check PRIVATE .. ../include ../components ../assets
   ../features ../features/files ../localization ../localization/fonts
   ../scenes)
 target_compile_definitions(ui_check PRIVATE AERA_DEFAULT_LANGUAGE="en" AERA_EXTRA_LANGUAGES)
-target_compile_definitions(ui_check PRIVATE AERA_ENABLE_MOBILE_DATA=1)
+target_compile_definitions(ui_check PRIVATE AERA_ENABLE_MOBILE_DATA=1 AERA_TELEGRAM_UI_TEST=1 AERA_ENABLE_EFISP=1)
 target_compile_definitions(ui_check PRIVATE
   AERA_FONT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../localization/fonts/assets"
   AERA_COMMON_FONT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../localization/fonts/assets")
@@ -238,7 +240,7 @@ add_executable(file_manager_test file_manager_test.cpp
   ../features/files/file_manager.cpp)
 target_include_directories(file_manager_test PRIVATE .. ../features/files)
 target_compile_options(file_manager_test PRIVATE -UNDEBUG)
-target_link_libraries(file_manager_test PRIVATE Threads::Threads)
+target_link_libraries(file_manager_test PRIVATE Threads::Threads OpenSSL::Crypto)
 add_test(NAME file_manager_operations COMMAND file_manager_test)
 add_test(NAME file_search_ui COMMAND ui_check --file-search)
 
@@ -500,3 +502,64 @@ add_executable(public_ip_test public_ip_test.cpp)
 target_compile_options(public_ip_test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_link_libraries(public_ip_test PRIVATE resolv Threads::Threads)
 add_test(NAME mobile_public_ipv4_parsing COMMAND public_ip_test)
+
+add_executable(plugin_text_input_test plugin_text_input_test.cpp)
+target_include_directories(plugin_text_input_test PRIVATE ../features)
+target_compile_options(plugin_text_input_test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_test(NAME plugin_native_text_validation COMMAND plugin_text_input_test)
+
+add_test(NAME telegram_local_session_ui COMMAND ui_check --telegram-session)
+
+add_executable(telegram_session_storage_test telegram_session_storage_test.cpp)
+target_include_directories(telegram_session_storage_test PRIVATE ../features)
+target_compile_options(telegram_session_storage_test PRIVATE -UNDEBUG)
+add_test(NAME telegram_session_storage_reset COMMAND telegram_session_storage_test)
+
+add_library(android_adb_rescue_test_support STATIC ../features/developer/android_adb_rescue.cpp
+  ../features/backup/android_packages_xml.cpp "${AERA_TINYXML2_DIR}/tinyxml2.cpp")
+target_include_directories(android_adb_rescue_test_support PUBLIC ../include "${AERA_TINYXML2_DIR}")
+target_link_libraries(android_adb_rescue_test_support PUBLIC jsoncpp_static OpenSSL::Crypto)
+target_compile_options(android_adb_rescue_test_support PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(ui_check PRIVATE android_adb_rescue_test_support)
+target_link_libraries(pc_connection_host PRIVATE android_adb_rescue_test_support)
+add_executable(android_adb_rescue_test android_adb_rescue_test.cpp)
+target_link_libraries(android_adb_rescue_test PRIVATE android_adb_rescue_test_support)
+target_compile_options(android_adb_rescue_test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_test(NAME android_adb_rescue_transactions COMMAND android_adb_rescue_test)
+
+add_test(NAME android_adb_rescue_ui COMMAND ui_check --android-adb-rescue)
+
+set_tests_properties(android_adb_rescue_transactions PROPERTIES SKIP_RETURN_CODE 77)
+
+foreach(mode unset disabled enabled)
+  add_executable(efisp_${mode}_test efisp_test.cpp)
+  target_include_directories(efisp_${mode}_test PRIVATE ../include)
+  target_compile_options(efisp_${mode}_test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+  if(mode STREQUAL "enabled")
+    target_compile_definitions(efisp_${mode}_test PRIVATE AERA_ENABLE_EFISP=1)
+  elseif(mode STREQUAL "disabled")
+    target_compile_definitions(efisp_${mode}_test PRIVATE AERA_ENABLE_EFISP=0)
+  endif()
+  add_test(NAME efisp_${mode}_policy_and_image_validation COMMAND efisp_${mode}_test)
+endforeach()
+
+add_test(NAME efisp_wipe_review_ui COMMAND ui_check --efisp-review)
+
+find_package(OpenSSL REQUIRED)
+set(AERA_LZMA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../external/lzma/C")
+add_executable(abl_guard_test abl_guard_test.cpp ../../aera_abl.cpp
+  "${AERA_LZMA_DIR}/LzmaDec.c" "${AERA_LZMA_DIR}/7zAlloc.c")
+target_include_directories(abl_guard_test PRIVATE "${AERA_LZMA_DIR}")
+target_compile_definitions(abl_guard_test PRIVATE AERA_ENABLE_EFISP=1 Z7_ST)
+target_compile_options(abl_guard_test PRIVATE -UNDEBUG)
+target_link_libraries(abl_guard_test PRIVATE OpenSSL::Crypto Threads::Threads)
+add_test(NAME efisp_abl_reader_and_session COMMAND abl_guard_test)
+
+add_test(NAME efisp_abl_warning_ui COMMAND ui_check --efisp-abl-warning)
+
+add_executable(abl_disabled_test abl_disabled_test.cpp ../../aera_abl.cpp)
+target_compile_definitions(abl_disabled_test PRIVATE AERA_ENABLE_EFISP=0)
+target_compile_options(abl_disabled_test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(abl_disabled_test PRIVATE OpenSSL::Crypto Threads::Threads)
+add_test(NAME efisp_abl_disabled_without_decoder COMMAND abl_disabled_test)
+add_test(NAME efisp_abl_preferences_status COMMAND ui_check --efisp-abl-status)

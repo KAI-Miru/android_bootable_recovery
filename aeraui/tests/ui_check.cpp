@@ -104,6 +104,8 @@ static bool adb_over_wifi = false;
 static bool adb_pairing = false;
 static std::vector<plugins::Plugin> home_plugins;
 static payload::Info review_info;
+static std::string image_zip_compatibility;
+std::string aeraui::RecoveryImageZipCompatibility(const std::string&) { return image_zip_compatibility; }
 namespace aeraui::payload {
 Info InspectZip(const std::string &, bool) { return review_info; }
 std::string Summary(const Info &) { return "Installer ZIP"; }
@@ -218,6 +220,17 @@ bool RecoverySetTintedIconBackgrounds(bool enabled) {
 }
 static std::string test_ui_font;
 static bool test_font_import = false;
+static bool test_efisp = false;
+static aera_efisp::AblWarning test_abl_warning;
+static std::string test_abl_ack;
+static std::vector<aera_efisp::AblSample> test_abl_samples;
+std::vector<aera_efisp::AblSample> RecoveryEfispAblStatus() { return test_abl_samples; }
+void RecoveryCaptureEfispAblBaseline() {}
+aera_efisp::AblWarning RecoveryEfispAblWarning() {
+  return test_abl_ack == test_abl_warning.token ? aera_efisp::AblWarning{} : test_abl_warning;
+}
+void RecoveryAcknowledgeEfispAbl(const std::string& token) { test_abl_ack = token; }
+void RecoveryClearEfispAblAcknowledgement() { test_abl_ack.clear(); }
 std::string RecoveryUiFont() { return test_ui_font; }
 bool RecoverySetUiFont(const std::string &id) { test_ui_font = id; return true; }
 std::string RecoveryUiFontPath(const std::string &id) {
@@ -398,6 +411,8 @@ int32_t StatusBarHeight() { return 165; }
 bool StatusBarShadeOpen() { return false; }
 void RefreshStatusBars() {}
 std::vector<Volume> RecoveryVolumes(const std::string &kind) {
+  if (test_efisp && (kind == "wipe" || kind == "backup"))
+    return {{"EFISP", "/efisp", 3145728}, {"Data", "/data", 23000000000}};
   if (kind == "storage" && test_font_import)
     return {{"Internal storage", file_root, 0}};
   if (kind == "wipe") return {{"FRP","/frp",524288},{"Dalvik / ART cache","DALVIK",0},{"Data","/data",23000000000},
@@ -768,6 +783,8 @@ static void AssertVisibleCaret(lv_obj_t *input) {
   assert(lv_obj_get_style_anim_duration(input, LV_PART_CURSOR) > 0);
 }
 #include "gpu_context.hpp"
+namespace aeraui { void BuildTelegramSessionTestScene(lv_obj_t *, bool, bool, int); }
+void RunTelegramSessionUiTests(lv_display_t *, lv_obj_t *);
 int main(int argc,char **argv) {
   assert(argc==2);
   char fixture_dir[]="/tmp/aera-restore-test-XXXXXX"; assert(mkdtemp(fixture_dir));
@@ -1355,6 +1372,26 @@ int main(int argc,char **argv) {
     }
     std::filesystem::remove_all(backup_root);
     puts("File search: toolbar, keyboard, recursive results, empty results and Back passed");
+    return 0;
+  }
+  if (!strcmp(argv[1], "--telegram-session")) {
+    RunTelegramSessionUiTests(display, screen);
+    lv_display_set_resolution(display, 1440, 3168);
+    auto *preview = lv_obj_create(nullptr);
+    BuildTelegramSessionTestScene(preview, true, false, -1);
+    lv_screen_load(preview); Tick();
+    auto *menu = Find(preview, LV_SYMBOL_SETTINGS); assert(menu);
+    lv_obj_send_event(menu, LV_EVENT_CLICKED, nullptr); Tick();
+    save("/tmp/aera-telegram-session-menu.png", 2);
+    auto *change = Find(preview, "Change vault password"); assert(change);
+    lv_obj_send_event(change, LV_EVENT_CLICKED, nullptr); Tick();
+    auto *old = FindType(preview, &lv_textarea_class); assert(old);
+    lv_textarea_set_text(old, "old-password");
+    auto *proceed = Find(preview, "Continue"); assert(proceed);
+    lv_obj_send_event(proceed, LV_EVENT_CLICKED, nullptr); Tick();
+    save("/tmp/aera-telegram-session-password.png", 2);
+    lv_screen_load(screen); lv_obj_delete(preview); Tick(2);
+    std::filesystem::remove_all(backup_root);
     return 0;
   }
   if (!strcmp(argv[1], "--browser-settings")) {
@@ -2197,6 +2234,104 @@ int main(int argc,char **argv) {
     puts("USB format: sole-selection gating, review-only choices, cancellation and disconnect passed");
     return 0;
   }
+  if (!strcmp(argv[1], "--efisp-abl-status")) {
+    abl_preservation_supported = true;
+    for (bool landscape : {false, true}) {
+      lv_display_set_resolution(display, landscape ? 3168 : 1440, landscape ? 1440 : 3168);
+      for (int size = 0; size < 4; ++size) {
+        interface_size = static_cast<InterfaceSize>(size); design::ApplyInterfaceSize(size);
+        test_abl_samples = {{"abl_a", "a", aera_efisp::AblStatus::EfispLoader},
+                            {"abl_b", "b", aera_efisp::AblStatus::NoEfispLoader}};
+        auto* prefs = lv_obj_create(nullptr);
+        BuildToolScene(prefs, Action::kPreferences, RecordAction, nullptr);
+        lv_screen_load(prefs); Tick();
+        auto* row = FindPreferenceEntry(prefs, "Keep current ABL"); assert(row);
+        auto* detail = FindLabelContaining(row, "Slot A: Vulnerable"); assert(detail);
+        assert(strstr(lv_label_get_text(detail), "Slot B: Non-vulnerable"));
+        AssertContained(detail, lv_obj_get_parent(detail));
+        if (!landscape && size == 1) {
+          lv_obj_scroll_to_view(row, LV_ANIM_OFF); Tick();
+          save("/tmp/aera-efisp-abl-preferences.png");
+        }
+        lv_screen_load(screen); lv_obj_delete(prefs);
+      }
+    }
+    test_abl_samples = {{"abl_a", "", aera_efisp::AblStatus::Unknown}};
+    auto* prefs = lv_obj_create(nullptr);
+    BuildToolScene(prefs, Action::kPreferences, RecordAction, nullptr);
+    lv_screen_load(prefs); Tick();
+    assert(FindLabelContaining(prefs, "Slot A: Unknown"));
+    std::filesystem::remove_all(backup_root);
+    puts("Keep current ABL per-slot detection and unknown status fit all interface sizes.");
+    return 0;
+  }
+  if (!strcmp(argv[1], "--efisp-abl-warning")) {
+    callback_count = 0;
+    test_abl_warning = {"abl_a: the vulnerable ABL has been overwritten.\n\nAn installed EFISP mod may no longer boot.", "changed-image-1"};
+    assert(!widgets::ConfirmEfispAblExit(screen, [] { ++callback_count; })); Tick();
+    assert(FindLabel(screen, "EFISP boot warning"));
+    assert(FindLabelContaining(screen, "vulnerable ABL has been overwritten"));
+    assert(FindLabel(screen, "Swipe to continue anyway"));
+    assert(callback_count == 0 && test_abl_ack.empty());
+    save("/tmp/aera-efisp-abl-warning.png");
+    assert(widgets::DismissModal(screen)); Tick();
+    assert(callback_count == 0 && test_abl_ack.empty());
+    assert(!widgets::ConfirmEfispAblExit(screen, [] { ++callback_count; })); Tick();
+    ConfirmSettingsModal(screen); Tick();
+    assert(callback_count == 1 && test_abl_ack == "changed-image-1");
+    assert(widgets::ConfirmEfispAblExit(screen, [] { ++callback_count; }));
+    test_abl_warning.token = "changed-image-2";
+    assert(!widgets::ConfirmEfispAblExit(screen, [] { ++callback_count; })); Tick();
+    assert(widgets::DismissModal(screen)); Tick();
+    assert(callback_count == 1);
+    std::filesystem::remove_all(backup_root);
+    puts("ABL exit warning cancellation, explicit consent and new-image recheck passed.");
+    return 0;
+  }
+  if (!strcmp(argv[1], "--efisp-review")) {
+    test_efisp = true;
+    for (bool landscape : {false, true}) {
+      lv_display_set_resolution(display, landscape ? 3168 : 1440, landscape ? 1440 : 3168);
+      auto *backup = lv_obj_create(nullptr);
+      BuildToolScene(backup, Action::kBackup, RecordAction, nullptr);
+      lv_screen_load(backup); Tick();
+      assert(FindLabel(backup, "EFISP"));
+      lv_screen_load(screen); lv_obj_delete(backup);
+      auto *wipe = lv_obj_create(nullptr);
+      BuildToolScene(wipe, Action::kWipe, RecordAction, nullptr);
+      lv_screen_load(wipe); Tick();
+      auto *efisp = Find(wipe, "EFISP"); assert(efisp);
+      lv_obj_send_event(efisp, LV_EVENT_CLICKED, nullptr); Tick();
+      auto *data = Find(wipe, "Data"); assert(data);
+      lv_obj_send_event(data, LV_EVENT_CLICKED, nullptr); Tick();
+      auto *review = Find(wipe, "Review wipe"); assert(review);
+      callback_count = 0;
+      lv_obj_send_event(review, LV_EVENT_CLICKED, nullptr); Tick();
+      assert(FindLabel(wipe, "EFISP wipe warning"));
+      assert(FindLabelContaining(wipe, aera_efisp::WipeWarning()));
+      assert(FindLabel(wipe, "Swipe to wipe EFISP"));
+      assert(callback_count == 0);
+      if (!landscape) save("/tmp/aera-efisp-wipe-review.png");
+      assert(widgets::DismissModal(wipe)); Tick();
+      assert(callback_count == 0);
+      lv_obj_send_event(review, LV_EVENT_CLICKED, nullptr); Tick();
+      ConfirmSettingsModal(wipe); Tick();
+      assert(callback_count == 1 && last_action == Action::kRunOperation);
+      const auto request = GetJobRequest();
+      assert(request.job == Job::kWipe && request.confirmation == "wipe-efisp");
+      assert(request.partitions.size() == 2 && EfispWipeAuthorized(request));
+      // No wipe runs: the host callback only records the requested operation.
+      lv_obj_send_event(efisp, LV_EVENT_CLICKED, nullptr); Tick();
+      lv_obj_send_event(review, LV_EVENT_CLICKED, nullptr); Tick();
+      assert(!FindLabel(wipe, "EFISP wipe warning"));
+      assert(FindLabel(wipe, "Review Wipe"));
+      assert(widgets::DismissModal(wipe)); Tick();
+      lv_screen_load(screen); lv_obj_delete(wipe);
+    }
+    std::filesystem::remove_all(backup_root);
+    puts("EFISP backup visibility, mixed wipe warning, cancellation and explicit acknowledgement passed.");
+    return 0;
+  }
   if (!strcmp(argv[1], "--wipe-layout")) {
     for (const char *language : {"en", "de_DE", "fr_FR"}) {
       assert(i18n::SetLanguage(language));
@@ -2616,8 +2751,8 @@ int main(int argc,char **argv) {
         {"vendor", 1000, 250, PayloadPhase::Verifying},
         {"product", 1000, 700, PayloadPhase::Writing},
         {"system_ext", 1000, 400, PayloadPhase::Writing},
-        {"my_product", 1000, 300, PayloadPhase::Writing},
-        {"my_stock", 1000, 200, PayloadPhase::Writing},
+        {"oem_product", 1000, 300, PayloadPhase::Writing},
+        {"oem_stock", 1000, 200, PayloadPhase::Writing},
         {"vendor_dlkm", 1000, 600, PayloadPhase::Verifying},
         {"odm", 1000, 900, PayloadPhase::Writing},
         {"boot", 100, 0, PayloadPhase::Queued}}};
@@ -2825,6 +2960,43 @@ int main(int argc,char **argv) {
     }
     }
     wallpaper::Clear();
+    review_info = {};
+    review_info.is_image_zip = review_info.valid = true;
+    review_info.target_build = "Test fastboot image ZIP";
+    review_info.manifest_hash.assign(32, 'z');
+    review_info.partitions = {{"boot", 4096, 0, true, ""}, {"system", 4096, 0, true, ""},
+                             {"recovery", 4096, 0, true, ""}};
+    review_info.image_zip_layout = {{"system", "rom", 1}};
+    review_info.image_zip_groups = {{"rom", 65536}};
+    for (bool compatible : {true, false}) {
+      image_zip_compatibility = compatible ? "" : "Package requirement failed: board=sun";
+      ReviewPackage(screen, "/images.zip", RecordAction, nullptr);
+      for (int i = 0; i < 50 && !Find(screen, "Select images to flash"); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10)); Tick();
+      }
+      auto* select = Find(screen, "Select images to flash"); assert(select);
+      assert(lv_obj_has_state(select, LV_STATE_DISABLED) == !compatible);
+      assert(!Find(screen, "Fast flash (experimental)"));
+      if (compatible) {
+        lv_obj_send_event(select, LV_EVENT_CLICKED, nullptr); Tick();
+        assert(Find(screen, "Flash selected ZIP images"));
+        auto* layout = Find(screen, "Apply ROM partition layout: Off"); assert(layout);
+        lv_obj_send_event(layout, LV_EVENT_CLICKED, nullptr); Tick();
+        assert(Find(screen, "Apply ROM partition layout: On"));
+        auto* all = Find(screen, "Select all"); assert(all);
+        lv_obj_send_event(all, LV_EVENT_CLICKED, nullptr); Tick();
+        assert(FindLabelContaining(screen, "2 selected /")); // Keep recovery is respected.
+        auto* review = Find(screen, "Review selected flash"); assert(review);
+        lv_obj_send_event(review, LV_EVENT_CLICKED, nullptr); Tick();
+        assert(FindLabelContaining(screen, "Required staging storage:"));
+        assert(FindLabelContaining(screen, "stock-only logical partitions"));
+        assert(!FindLabelContaining(screen, "No temporary images are saved"));
+        assert(callback_count == 0);
+        save("/tmp/aera-image-zip-confirmation.png");
+      }
+      lv_obj_clean(screen); Tick();
+    }
+    image_zip_compatibility.clear();
     review_info = {};
     ReviewPackage(screen, "/installer.zip", RecordAction, nullptr);
     for (int i = 0; i < 50 && !Find(screen, "Advanced  " LV_SYMBOL_RIGHT); ++i) {
@@ -3099,6 +3271,27 @@ int main(int argc,char **argv) {
     lv_deinit(); std::filesystem::remove_all(backup_root);
     puts("Developer entry, categories, session-only choice and numeric editor layouts passed.");
     return 0;
+  }
+  if (!strcmp(argv[1], "--android-adb-rescue")) {
+    for (bool landscape : {false, true}) for (int size : {0, 1, 3}) {
+      design::ApplyInterfaceSize(size); interface_size = static_cast<InterfaceSize>(size);
+      lv_display_set_resolution(display, landscape ? 3168 : 1440, landscape ? 1440 : 3168);
+      auto *page = lv_obj_create(nullptr);
+      BuildToolScene(page, Action::kAndroidAdbRescue, RecordAction, nullptr); lv_screen_load(page); Tick();
+      assert(FindLabel(page, "Android ADB Rescue"));
+      assert(FindLabelContaining(page, "%USERPROFILE%"));
+      assert(FindLabelContaining(page, "~/.android/adbkey.pub"));
+      assert(Find(page, "Choose adbkey.pub"));
+      auto *button = Find(page, "Enable Android ADB"); assert(button);
+      lv_obj_send_event(button, LV_EVENT_CLICKED, nullptr); Tick();
+      assert(FindLabelContaining(page, "Enable Android ADB and authorize the selected key?"));
+      auto *cancel = Find(page, "Cancel"); assert(cancel);
+      lv_obj_send_event(cancel, LV_EVENT_CLICKED, nullptr); Tick();
+      if (size == 1) save(landscape ? "/tmp/aera-android-rescue-landscape.png" : "/tmp/aera-android-rescue-portrait.png");
+      lv_screen_load(screen); lv_obj_delete(page); Tick();
+    }
+    lv_deinit(); std::filesystem::remove_all(backup_root);
+    puts("Android ADB Rescue navigation, public-key instructions and confirmation passed."); return 0;
   }
   if (!strcmp(argv[1], "--slot-warning")) {
     const char *ack_text = "I understand the risks and have checked the target slot.";
@@ -4388,3 +4581,12 @@ int main(int argc,char **argv) {
   lv_deinit();
   std::filesystem::remove_all(backup_root);
 }
+
+aeraui::adb_rescue::Status aeraui::RecoveryAndroidAdbRescueStatus() {
+  adb_rescue::Status status; status.available = true; status.settings_format = "ABX";
+  status.settings_path = "/data/system/users/0/settings_global.xml"; return status;
+}
+bool aeraui::RecoveryAndroidAdbRescueApply(const std::string &, bool, std::string *) { return true; }
+bool aeraui::RecoveryAndroidAdbRescueBusy() { return false; }
+bool aeraui::RecoveryReadAdbPublicKey(const std::string &, adb_rescue::PublicKey *, std::string *) { return false; }
+std::string aeraui::RecoveryInternalStorage() { return "/data/media/0"; }

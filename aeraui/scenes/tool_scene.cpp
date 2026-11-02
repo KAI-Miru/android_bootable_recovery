@@ -498,6 +498,7 @@ std::string WipeDescription(const std::string &path) {
   if (path == "INTERNAL") return "Deletes photos, downloads and files";
   if (path == "/data") return "Erase apps and settings on the data partition";
   if (path == "/metadata") return "Encryption metadata; may make data inaccessible";
+  if (path == "/efisp") return "Requires Format Data before Android can boot again";
   if (path == "/frp") return "Erase Factory Reset Protection data and any OEM-unlock state stored here";
   return i18n::Format("Erase %s", path.c_str());
 }
@@ -660,7 +661,7 @@ void PartitionRows(Tools *state) {
       lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
       const auto detail = wipe ? WipeDescription(v.path) : v.path;
       auto *path = Label(row, detail.c_str(), &lv_font_montserrat_32,
-          wipe && (v.path == "/metadata" || v.path == "INTERNAL" || v.path == "/frp") ? kAmber : kMuted);
+          wipe && (v.path == "/metadata" || v.path == "INTERNAL" || v.path == "/frp" || v.path == "/efisp") ? kAmber : kMuted);
       lv_obj_set_pos(path, 112, 76);
       lv_obj_set_width(path, wipe ? row_width - 150 : row_width - 430);
       lv_label_set_long_mode(path, LV_LABEL_LONG_DOT);
@@ -754,6 +755,8 @@ void Review(Tools *state) {
   request.path = state->tool == Action::kRestore ? state->restore_folder : RecoveryStorage();
   request.compression = state->compression;
   request.partitions.assign(state->selected.begin(), state->selected.end());
+  const bool wipe_efisp = request.job == Job::kWipe && state->selected.count("/efisp");
+  if (wipe_efisp) request.confirmation = "wipe-efisp";
   std::string text;
   if (request.job == Job::kBackup) {
     uint64_t bytes = 0;
@@ -779,8 +782,11 @@ void Review(Tools *state) {
     text += i18n::Translate(state->compression ? "\nCompression on. Digests included." :
                                 "\nCompression off. Digests included.");
   if (request.job == Job::kRestore) text += i18n::Translate("\nDigest verification enabled.");
-  Sheet(state->screen, i18n::Format("Review %s", i18n::Translate(request.title.c_str())), text,
-        [state, request] { Run(state, request); });
+  if (wipe_efisp) text = std::string(i18n::Translate(aera_efisp::WipeWarning())) + "\n\n" + text;
+  Sheet(state->screen, wipe_efisp ? i18n::Translate("EFISP wipe warning") :
+        i18n::Format("Review %s", i18n::Translate(request.title.c_str())), text,
+        [state, request] { Run(state, request); }, 0, false,
+        SheetPresentation::kStandard, wipe_efisp ? "Swipe to wipe EFISP" : "Swipe to confirm");
 }
 
 void RestoreFolders(Tools *state) {
@@ -1324,27 +1330,41 @@ void PreferenceColumn(lv_obj_t *object, int gap = 12) {
 lv_obj_t *PreferenceEntry(Tools *state, const char *symbol,
                           const char *title, const std::string &description,
                           Handler action, bool toggle = false, bool lock_icon = false) {
+  const bool card = state != nullptr && state->tool == Action::kPreferences;
   auto *row = lv_button_create(state->list);
   Clear(row);
-  lv_obj_set_style_bg_color(row, kMainSelected, LV_STATE_PRESSED);
+  if (card) {
+    Panel(row, 28, kMainPanel);
+    Interactive(row, kMainSelected);
+    lv_obj_set_style_border_width(row, 1, 0);
+    lv_obj_set_style_border_color(row, kMainLine, 0);
+    lv_obj_set_style_border_opa(row, LV_OPA_30, 0);
+  } else {
+    lv_obj_set_style_bg_color(row, kMainSelected, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 1, 0);
+    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_color(row, kMainLine, 0);
+    lv_obj_set_style_border_opa(row, LV_OPA_30, 0);
+    lv_obj_set_style_radius(row, 0, 0);
+  }
   if (action) OnClick(row, std::move(action));
   lv_obj_set_width(row, LV_PCT(100));
   lv_obj_set_height(row, LV_SIZE_CONTENT);
-  lv_obj_set_style_min_height(row, 154, 0);
-  lv_obj_set_style_pad_all(row, 24, 0);
+  lv_obj_set_style_min_height(row, card ? 170 : 154, 0);
+  lv_obj_set_style_pad_all(row, card ? 28 : 24, 0);
   lv_obj_set_style_pad_column(row, 28, 0);
-  lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_border_width(row, 1, 0);
-  lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
-  lv_obj_set_style_border_color(row, kMainLine, 0);
-  lv_obj_set_style_border_opa(row, LV_OPA_30, 0);
-  lv_obj_set_style_radius(row, 0, 0);
   lv_obj_set_style_transform_scale(row, 256, LV_STATE_PRESSED);
   lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                        LV_FLEX_ALIGN_CENTER);
-  auto *icon = lock_icon ? LockIcon(row, 56) : Label(row, symbol, &lv_font_montserrat_32, kAccent);
-  lv_obj_set_width(icon, 56);
+  if (card && !lock_icon) {
+    IconPlate(row, symbol, kAccent, kAccentSoft, 78);
+  } else {
+    auto *icon = lock_icon ? LockIcon(row, card ? 78 : 56) :
+        Label(row, symbol, &lv_font_montserrat_32, kAccent);
+    lv_obj_set_width(icon, card ? 78 : 56);
+  }
   auto *text = lv_obj_create(row);
   Clear(text);
   lv_obj_remove_flag(text, LV_OBJ_FLAG_CLICKABLE);
@@ -2735,8 +2755,9 @@ void BuildPreferences(Tools *state) {
     lv_obj_set_width(state->list, 1400);
   }
   lv_obj_set_flex_flow(state->list, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_style_pad_row(state->list, 8, 0);
-  lv_obj_set_style_pad_bottom(state->list, 32, 0);
+  lv_obj_set_style_pad_all(state->list, 12, 0);
+  lv_obj_set_style_pad_row(state->list, 18, 0);
+  lv_obj_set_style_pad_bottom(state->list, 40, 0);
   lv_obj_set_scrollbar_mode(state->list, LV_SCROLLBAR_MODE_ACTIVE);
 
   PreferenceSection(state, "Display & regional");
@@ -2783,8 +2804,12 @@ void BuildPreferences(Tools *state) {
 
   auto *brightness = lv_obj_create(state->list);
   Clear(brightness);
+  Panel(brightness, 28, kMainPanel);
+  lv_obj_set_style_border_width(brightness, 1, 0);
+  lv_obj_set_style_border_color(brightness, kMainLine, 0);
+  lv_obj_set_style_border_opa(brightness, LV_OPA_30, 0);
   PreferenceColumn(brightness, 12);
-  lv_obj_set_style_pad_all(brightness, 24, 0);
+  lv_obj_set_style_pad_all(brightness, 28, 0);
   auto *brightness_heading = lv_obj_create(brightness);
   Clear(brightness_heading);
   lv_obj_set_width(brightness_heading, LV_PCT(100));
@@ -2830,8 +2855,12 @@ void BuildPreferences(Tools *state) {
   if (RecoveryScreenTimeoutSupported()) {
     auto *timeout = lv_obj_create(state->list);
     Clear(timeout);
+    Panel(timeout, 28, kMainPanel);
+    lv_obj_set_style_border_width(timeout, 1, 0);
+    lv_obj_set_style_border_color(timeout, kMainLine, 0);
+    lv_obj_set_style_border_opa(timeout, LV_OPA_30, 0);
     PreferenceColumn(timeout, 12);
-    lv_obj_set_style_pad_all(timeout, 24, 0);
+    lv_obj_set_style_pad_all(timeout, 28, 0);
     auto *heading = lv_obj_create(timeout);
     Clear(heading);
     lv_obj_set_size(heading, LV_PCT(100), LV_SIZE_CONTENT);
@@ -2974,10 +3003,20 @@ void BuildPreferences(Tools *state) {
   PreferenceToggle(state, LV_SYMBOL_REFRESH, "Keep AERA installed",
                    "Restore the running AERA recovery to both slots after ZIP installs",
                    Preference::kPreserveRecovery);
-  if (RecoveryAblPreservationSupported())
-    PreferenceToggle(state, LV_SYMBOL_SAVE, "Keep current ABL",
-                     "Restore the active-slot ABL to both slots after ZIP installs",
-                     Preference::kPreserveAbl);
+  if (RecoveryAblPreservationSupported()) {
+    std::string detail = i18n::Translate("Restore the active-slot ABL to both slots after ZIP installs");
+    if (aera_efisp::Enabled()) {
+      const auto samples = RecoveryEfispAblStatus();
+      if (samples.empty()) detail += "\n" + std::string(i18n::Translate("ABL status: Unknown"));
+      for (const auto& sample : samples) {
+        const char* label = sample.name == "abl_a" ? "Slot A" : sample.name == "abl_b" ? "Slot B" : "ABL";
+        const char* status = sample.status == aera_efisp::AblStatus::EfispLoader ? "Vulnerable" :
+            sample.status == aera_efisp::AblStatus::NoEfispLoader ? "Non-vulnerable" : "Unknown";
+        detail += "\n" + std::string(i18n::Translate(label)) + ": " + i18n::Translate(status);
+      }
+    }
+    PreferenceToggle(state, LV_SYMBOL_SAVE, "Keep current ABL", detail.c_str(), Preference::kPreserveAbl);
+  }
 
   PreferenceSection(state, "Backup & connection");
   PreferenceToggle(state, LV_SYMBOL_SAVE, "Compress backups by default",
@@ -3014,8 +3053,7 @@ void BuildPreferences(Tools *state) {
             if (AutoSaveSettings(state)) Open(state, Action::kPreferences);
           }, 0, false, SheetPresentation::kStandard, "Swipe to confirm");
   });
-  lv_obj_set_width(reset, LV_PCT(100));
-  lv_obj_set_height(reset, 124);
+  StyleThemeReset(reset);
 }
 
 void RefreshBatterySettings(Tools *state) {
@@ -3788,6 +3826,9 @@ void OpenFontPreview(lv_obj_t *screen, const std::string &path, std::function<vo
 }
 
 void BuildToolScene(lv_obj_t *screen, Action tool, ActionCallback callback, void *context) {
+  if (tool == Action::kAndroidAdbRescue) {
+    BuildAndroidAdbRescueScene(screen, callback, context); return;
+  }
   if (tool == Action::kDeveloperSettings) {
     BuildDeveloperScene(screen, callback, context);
     return;

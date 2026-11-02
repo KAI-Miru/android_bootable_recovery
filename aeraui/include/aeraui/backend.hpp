@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #pragma once
 #include "../../../aera_wlan_ip.hpp"
+#include "../../../aera_efisp.hpp"
+#include "../../../aera_abl.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -9,8 +11,14 @@
 #include "aeraui/home_layout.hpp"
 #include "aeraui/kernel_settings.hpp"
 #include "aeraui/fonts.hpp"
+#include "aeraui/android_adb_rescue.hpp"
 
 namespace aeraui {
+void RecoveryCaptureEfispAblBaseline();
+aera_efisp::AblWarning RecoveryEfispAblWarning();
+std::vector<aera_efisp::AblSample> RecoveryEfispAblStatus();
+void RecoveryAcknowledgeEfispAbl(const std::string& token);
+void RecoveryClearEfispAblAcknowledgement();
 inline constexpr bool MobileDataEnabled() {
 #if defined(AERA_ENABLE_MOBILE_DATA) && AERA_ENABLE_MOBILE_DATA == 1
   return true;
@@ -59,6 +67,10 @@ bool RecoveryResetDeveloperSettings(std::string *error);
 void RecoveryPollDeveloperSettings();
 void RecoverySkipDeveloperSettings();
 bool RecoveryExportDeveloperSettings(std::string *path, std::string *error);
+adb_rescue::Status RecoveryAndroidAdbRescueStatus();
+bool RecoveryAndroidAdbRescueApply(const std::string &public_key, bool restore, std::string *error);
+bool RecoveryAndroidAdbRescueBusy();
+bool RecoveryReadAdbPublicKey(const std::string &path, adb_rescue::PublicKey *key, std::string *error);
 enum class Job {
   kInstall,
   kSideload,
@@ -135,6 +147,7 @@ struct JobRequest {
   bool payload_arb_acknowledged = false;
   std::string expected_image_sha256; // Only set for verified selected OTA images.
   uint64_t expected_image_bytes = 0;
+  bool image_zip_apply_layout = false;
   bool payload_direct = false;
   bool payload_full = false; // Every image is mandatory except explicitly protected partitions.
   bool payload_override_protection = false; // Explicit manual Advanced selection only.
@@ -142,6 +155,15 @@ struct JobRequest {
 };
 inline bool PayloadTargetMatches(const std::string &name, const std::string &path) {
   return path == "/" + name || (name == "system" && path == "/system_root");
+}
+inline bool EfispWipeAuthorized(const JobRequest &request) {
+  if (request.job != Job::kWipe) return true;
+  bool efisp = false;
+  for (const auto &path : request.partitions) {
+    if (path == "/efisp") efisp = true;
+    if (path.compare(0, 7, "/efisp/") == 0) return false;
+  }
+  return !efisp || (aera_efisp::Enabled() && request.confirmation == "wipe-efisp");
 }
 inline bool FormatDataAuthorized(const JobRequest &request) {
   return request.job == Job::kFormatData && request.path == "/data" &&
@@ -201,6 +223,7 @@ struct PayloadFlashProgress {
   std::vector<PayloadPartitionProgress> partitions;
 };
 PayloadFlashProgress RecoveryPayloadFlashProgress();
+std::string RecoveryImageZipCompatibility(const std::string& path);
 std::vector<PayloadFlashTarget> RecoveryPayloadTargets(const std::vector<std::string> &names);
 std::vector<Volume> RecoveryRestoreVolumes(const std::string &folder);
 std::string RecoveryStorage();

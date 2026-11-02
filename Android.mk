@@ -51,6 +51,7 @@ LOCAL_SRC_FILES := \
     twrp-functions.cpp \
     aera_core.cpp \
     aera_flash_log.cpp \
+    aera_abl.cpp \
     aera_flash_log_platform.cpp \
     twrpDigestDriver.cpp \
     openrecoveryscript.cpp \
@@ -69,6 +70,11 @@ LOCAL_SRC_FILES := \
     twrpRepacker.cpp \
     aeraui/platform/screen_lock.cpp \
     aeraui/platform/android_screen_credential_stub.cpp
+
+# The existing Android LZMA decoder is only needed by opted-in EFISP devices.
+ifeq ($(AERA_ENABLE_EFISP),1)
+LOCAL_STATIC_LIBRARIES += liblzma
+endif
 
 LOCAL_STATIC_LIBRARIES += libjsoncpp
 LOCAL_C_INCLUDES += \

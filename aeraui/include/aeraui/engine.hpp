@@ -90,6 +90,7 @@ enum class Action {
     kMobileData,
     kQuickMobileToggle,
     kQuickPcToggle,
+    kAndroidAdbRescue,
 };
 
 enum class DecryptionCompletion {
